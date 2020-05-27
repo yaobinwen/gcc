@@ -20,3 +20,14 @@ Copyright years on GCC source files may be listed using range
 notation, e.g., 1987-2012, indicating that every year in the range,
 inclusive, is a copyrightable year that could otherwise be listed
 individually.
+
+---
+
+NOTE that the code is on `master` which may not be the version of GCC
+you want to look at. Find the appropriate tagged version in `git tag`.
+
+I have created the branch `ywen/releases/gcc-7.5.0` which contains my
+notes.
+
+C++ standard library code is in the directory `libstdc++-v3`. See the
+`README` there.
