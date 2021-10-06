@@ -6,7 +6,7 @@
  *                                                                          *
  *                              C Header File                               *
  *                                                                          *
- *          Copyright (C) 1992-2020, Free Software Foundation, Inc.         *
+ *          Copyright (C) 1992-2021, Free Software Foundation, Inc.         *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -525,13 +525,6 @@ do {						   \
 #define SET_DECL_INDUCTION_VAR(NODE, X) \
   SET_DECL_LANG_SPECIFIC (VAR_DECL_CHECK (NODE), X)
 
-/* In a VAR_DECL without the DECL_LOOP_PARM_P flag set and that is a renaming
-   pointer, points to the object being renamed, if any.  */
-#define DECL_RENAMED_OBJECT(NODE) \
-  GET_DECL_LANG_SPECIFIC (VAR_DECL_CHECK (NODE))
-#define SET_DECL_RENAMED_OBJECT(NODE, X) \
-  SET_DECL_LANG_SPECIFIC (VAR_DECL_CHECK (NODE), X)
-
 /* In a TYPE_DECL, points to the parallel type if any, otherwise 0.  */
 #define DECL_PARALLEL_TYPE(NODE) \
   GET_DECL_LANG_SPECIFIC (TYPE_DECL_CHECK (NODE))
@@ -587,6 +580,6 @@ do {						   \
 #define EXIT_STMT_LABEL(NODE)    TREE_OPERAND_CHECK_CODE (NODE, EXIT_STMT, 1)
 
 /* Small kludge to be able to define Ada built-in functions locally.
-   We overload them on top of the HSAIL/BRIG builtin functions.  */
-#define BUILT_IN_LIKELY   BUILT_IN_HSAIL_WORKITEMABSID
-#define BUILT_IN_UNLIKELY BUILT_IN_HSAIL_GRIDSIZE
+   We overload them on top of the C++ coroutines builtin functions.  */
+#define BUILT_IN_LIKELY   BUILT_IN_CORO_PROMISE
+#define BUILT_IN_UNLIKELY BUILT_IN_CORO_RESUME

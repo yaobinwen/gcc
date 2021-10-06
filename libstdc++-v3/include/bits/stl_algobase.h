@@ -1,6 +1,6 @@
 // Core algorithmic facilities -*- C++ -*-
 
-// Copyright (C) 2001-2020 Free Software Foundation, Inc.
+// Copyright (C) 2001-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -314,6 +314,11 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     _GLIBCXX_NOEXCEPT_IF(std::is_nothrow_copy_constructible<_Iterator>::value)
     { return __it; }
 
+  template<typename _Ite, typename _Seq>
+    _Ite
+    __niter_base(const ::__gnu_debug::_Safe_iterator<_Ite, _Seq,
+		 std::random_access_iterator_tag>&);
+
   // Reverse the __niter_base transformation to get a
   // __normal_iterator back again (this assumes that __normal_iterator
   // is only used to wrap random access iterators, like pointers).
@@ -415,11 +420,11 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__copy_m(const _Tp* __first, const _Tp* __last, _Tp* __result)
 	{
 #if __cplusplus >= 201103L
-	  using __assignable = conditional<_IsMove,
-					   is_move_assignable<_Tp>,
-					   is_copy_assignable<_Tp>>;
+	  using __assignable = __conditional_t<_IsMove,
+					       is_move_assignable<_Tp>,
+					       is_copy_assignable<_Tp>>;
 	  // trivial types can have deleted assignment
-	  static_assert( __assignable::type::value, "type is not assignable" );
+	  static_assert( __assignable::value, "type must be assignable" );
 #endif
 	  const ptrdiff_t _Num = __last - __first;
 	  if (_Num)
@@ -465,6 +470,15 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
 				    _CharT*>::__type
     __copy_move_a2(istreambuf_iterator<_CharT, char_traits<_CharT> >,
 		   istreambuf_iterator<_CharT, char_traits<_CharT> >, _CharT*);
+
+  template<bool _IsMove, typename _CharT>
+    typename __gnu_cxx::__enable_if<
+      __is_char<_CharT>::__value,
+      _GLIBCXX_STD_C::_Deque_iterator<_CharT, _CharT&, _CharT*> >::__type
+    __copy_move_a2(
+	istreambuf_iterator<_CharT, char_traits<_CharT> >,
+	istreambuf_iterator<_CharT, char_traits<_CharT> >,
+	_GLIBCXX_STD_C::_Deque_iterator<_CharT, _CharT&, _CharT*>);
 
   template<bool _IsMove, typename _II, typename _OI>
     _GLIBCXX20_CONSTEXPR
@@ -539,13 +553,48 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
 		  const ::__gnu_debug::_Safe_iterator<_IIte, _ISeq, _ICat>&,
 		  const ::__gnu_debug::_Safe_iterator<_OIte, _OSeq, _OCat>&);
 
+  template<typename _InputIterator, typename _Size, typename _OutputIterator>
+    _GLIBCXX20_CONSTEXPR
+    _OutputIterator
+    __copy_n_a(_InputIterator __first, _Size __n, _OutputIterator __result,
+	       bool)
+    {
+      if (__n > 0)
+	{
+	  while (true)
+	    {
+	      *__result = *__first;
+	      ++__result;
+	      if (--__n > 0)
+		++__first;
+	      else
+		break;
+	    }
+	}
+      return __result;
+    }
+
+  template<typename _CharT, typename _Size>
+    typename __gnu_cxx::__enable_if<
+      __is_char<_CharT>::__value, _CharT*>::__type
+    __copy_n_a(istreambuf_iterator<_CharT, char_traits<_CharT> >,
+	       _Size, _CharT*, bool);
+
+  template<typename _CharT, typename _Size>
+    typename __gnu_cxx::__enable_if<
+      __is_char<_CharT>::__value,
+      _GLIBCXX_STD_C::_Deque_iterator<_CharT, _CharT&, _CharT*> >::__type
+    __copy_n_a(istreambuf_iterator<_CharT, char_traits<_CharT> >, _Size,
+	       _GLIBCXX_STD_C::_Deque_iterator<_CharT, _CharT&, _CharT*>,
+	       bool);
+
   /**
    *  @brief Copies the range [first,last) into result.
    *  @ingroup mutating_algorithms
    *  @param  __first  An input iterator.
    *  @param  __last   An input iterator.
    *  @param  __result An output iterator.
-   *  @return   result + (first - last)
+   *  @return   result + (last - first)
    *
    *  This inline function will boil down to a call to @c memmove whenever
    *  possible.  Failing that, if random access iterators are passed, then the
@@ -564,7 +613,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
       // concept requirements
       __glibcxx_function_requires(_InputIteratorConcept<_II>)
       __glibcxx_function_requires(_OutputIteratorConcept<_OI,
-	    typename iterator_traits<_II>::value_type>)
+	    typename iterator_traits<_II>::reference>)
       __glibcxx_requires_can_increment_range(__first, __last, __result);
 
       return std::__copy_move_a<__is_move_iterator<_II>::__value>
@@ -578,7 +627,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
    *  @param  __first  An input iterator.
    *  @param  __last   An input iterator.
    *  @param  __result An output iterator.
-   *  @return   result + (first - last)
+   *  @return   result + (last - first)
    *
    *  This inline function will boil down to a call to @c memmove whenever
    *  possible.  Failing that, if random access iterators are passed, then the
@@ -597,7 +646,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
       // concept requirements
       __glibcxx_function_requires(_InputIteratorConcept<_II>)
       __glibcxx_function_requires(_OutputIteratorConcept<_OI,
-	    typename iterator_traits<_II>::value_type>)
+	    typename iterator_traits<_II>::value_type&&>)
       __glibcxx_requires_can_increment_range(__first, __last, __result);
 
       return std::__copy_move_a<true>(std::__miter_base(__first),
@@ -682,11 +731,11 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
 	__copy_move_b(const _Tp* __first, const _Tp* __last, _Tp* __result)
 	{
 #if __cplusplus >= 201103L
-	  using __assignable = conditional<_IsMove,
-					   is_move_assignable<_Tp>,
-					   is_copy_assignable<_Tp>>;
+	  using __assignable = __conditional_t<_IsMove,
+					       is_move_assignable<_Tp>,
+					       is_copy_assignable<_Tp>>;
 	  // trivial types can have deleted assignment
-	  static_assert( __assignable::type::value, "type is not assignable" );
+	  static_assert( __assignable::value, "type must be assignable" );
 #endif
 	  const ptrdiff_t _Num = __last - __first;
 	  if (_Num)
@@ -781,7 +830,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
    *  @param  __first  A bidirectional iterator.
    *  @param  __last   A bidirectional iterator.
    *  @param  __result A bidirectional iterator.
-   *  @return   result - (first - last)
+   *  @return   result - (last - first)
    *
    *  The function has the same effect as copy, but starts at the end of the
    *  range and works its way to the start, returning the start of the result.
@@ -801,9 +850,8 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
       // concept requirements
       __glibcxx_function_requires(_BidirectionalIteratorConcept<_BI1>)
       __glibcxx_function_requires(_Mutable_BidirectionalIteratorConcept<_BI2>)
-      __glibcxx_function_requires(_ConvertibleConcept<
-	    typename iterator_traits<_BI1>::value_type,
-	    typename iterator_traits<_BI2>::value_type>)
+      __glibcxx_function_requires(_OutputIteratorConcept<_BI2,
+	    typename iterator_traits<_BI1>::reference>)
       __glibcxx_requires_can_decrement_range(__first, __last, __result);
 
       return std::__copy_move_backward_a<__is_move_iterator<_BI1>::__value>
@@ -817,7 +865,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
    *  @param  __first  A bidirectional iterator.
    *  @param  __last   A bidirectional iterator.
    *  @param  __result A bidirectional iterator.
-   *  @return   result - (first - last)
+   *  @return   result - (last - first)
    *
    *  The function has the same effect as move, but starts at the end of the
    *  range and works its way to the start, returning the start of the result.
@@ -837,9 +885,8 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
       // concept requirements
       __glibcxx_function_requires(_BidirectionalIteratorConcept<_BI1>)
       __glibcxx_function_requires(_Mutable_BidirectionalIteratorConcept<_BI2>)
-      __glibcxx_function_requires(_ConvertibleConcept<
-	    typename iterator_traits<_BI1>::value_type,
-	    typename iterator_traits<_BI2>::value_type>)
+      __glibcxx_function_requires(_OutputIteratorConcept<_BI2,
+	    typename iterator_traits<_BI1>::value_type&&>)
       __glibcxx_requires_can_decrement_range(__first, __last, __result);
 
       return std::__copy_move_backward_a<true>(std::__miter_base(__first),
@@ -965,39 +1012,39 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
   __size_to_integer(unsigned long long __n) { return __n; }
 
 #if defined(__GLIBCXX_TYPE_INT_N_0)
-  inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_0
+  __extension__ inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_0
   __size_to_integer(__GLIBCXX_TYPE_INT_N_0 __n) { return __n; }
-  inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_0
+  __extension__ inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_0
   __size_to_integer(unsigned __GLIBCXX_TYPE_INT_N_0 __n) { return __n; }
 #endif
 #if defined(__GLIBCXX_TYPE_INT_N_1)
-  inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_1
+  __extension__ inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_1
   __size_to_integer(__GLIBCXX_TYPE_INT_N_1 __n) { return __n; }
-  inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_1
+  __extension__ inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_1
   __size_to_integer(unsigned __GLIBCXX_TYPE_INT_N_1 __n) { return __n; }
 #endif
 #if defined(__GLIBCXX_TYPE_INT_N_2)
-  inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_2
+  __extension__ inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_2
   __size_to_integer(__GLIBCXX_TYPE_INT_N_2 __n) { return __n; }
-  inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_2
+  __extension__ inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_2
   __size_to_integer(unsigned __GLIBCXX_TYPE_INT_N_2 __n) { return __n; }
 #endif
 #if defined(__GLIBCXX_TYPE_INT_N_3)
-  inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_3
+  __extension__ inline _GLIBCXX_CONSTEXPR unsigned __GLIBCXX_TYPE_INT_N_3
   __size_to_integer(__GLIBCXX_TYPE_INT_N_3 __n) { return __n; }
-  inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_3
+  __extension__ inline _GLIBCXX_CONSTEXPR __GLIBCXX_TYPE_INT_N_3
   __size_to_integer(unsigned __GLIBCXX_TYPE_INT_N_3 __n) { return __n; }
 #endif
 
   inline _GLIBCXX_CONSTEXPR long long
-  __size_to_integer(float __n) { return __n; }
+  __size_to_integer(float __n) { return (long long)__n; }
   inline _GLIBCXX_CONSTEXPR long long
-  __size_to_integer(double __n) { return __n; }
+  __size_to_integer(double __n) { return (long long)__n; }
   inline _GLIBCXX_CONSTEXPR long long
-  __size_to_integer(long double __n) { return __n; }
+  __size_to_integer(long double __n) { return (long long)__n; }
 #if !defined(__STRICT_ANSI__) && defined(_GLIBCXX_USE_FLOAT128)
-  inline _GLIBCXX_CONSTEXPR long long
-  __size_to_integer(__float128 __n) { return __n; }
+  __extension__ inline _GLIBCXX_CONSTEXPR long long
+  __size_to_integer(__float128 __n) { return (long long)__n; }
 #endif
 
   template<typename _OutputIterator, typename _Size, typename _Tp>
@@ -1095,7 +1142,7 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
     fill_n(_OI __first, _Size __n, const _Tp& __value)
     {
       // concept requirements
-      __glibcxx_function_requires(_OutputIteratorConcept<_OI, _Tp>)
+      __glibcxx_function_requires(_OutputIteratorConcept<_OI, const _Tp&>)
 
       return std::__fill_n_a(__first, std::__size_to_integer(__n), __value,
 			       std::__iterator_category(__first));
@@ -1264,6 +1311,25 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
 						     __first2, __last2,
 						     __iter_less_iter());
 	}
+
+      template<typename _II1, typename _II2>
+	_GLIBCXX20_CONSTEXPR
+	static int
+	__3way(_II1 __first1, _II1 __last1, _II2 __first2, _II2 __last2)
+	{
+	  while (__first1 != __last1)
+	    {
+	      if (__first2 == __last2)
+		return +1;
+	      if (*__first1 < *__first2)
+		return -1;
+	      if (*__first2 < *__first1)
+		return +1;
+	      ++__first1;
+	      ++__first2;
+	    }
+	  return int(__first2 == __last2) - 1;
+	}
     };
 
   template<>
@@ -1274,28 +1340,33 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
 	static bool
 	__lc(const _Tp* __first1, const _Tp* __last1,
 	     const _Up* __first2, const _Up* __last2)
+	{ return __3way(__first1, __last1, __first2, __last2) < 0; }
+
+      template<typename _Tp, typename _Up>
+	_GLIBCXX20_CONSTEXPR
+	static ptrdiff_t
+	__3way(const _Tp* __first1, const _Tp* __last1,
+	       const _Up* __first2, const _Up* __last2)
 	{
 	  const size_t __len1 = __last1 - __first1;
 	  const size_t __len2 = __last2 - __first2;
 	  if (const size_t __len = std::min(__len1, __len2))
 	    if (int __result = std::__memcmp(__first1, __first2, __len))
-	      return __result < 0;
-	  return __len1 < __len2;
+	      return __result;
+	  return ptrdiff_t(__len1 - __len2);
 	}
     };
 
   template<typename _II1, typename _II2>
     _GLIBCXX20_CONSTEXPR
     inline bool
-    __lexicographical_compare_aux(_II1 __first1, _II1 __last1,
-				  _II2 __first2, _II2 __last2)
+    __lexicographical_compare_aux1(_II1 __first1, _II1 __last1,
+				   _II2 __first2, _II2 __last2)
     {
       typedef typename iterator_traits<_II1>::value_type _ValueType1;
       typedef typename iterator_traits<_II2>::value_type _ValueType2;
       const bool __simple =
-	(__is_byte<_ValueType1>::__value && __is_byte<_ValueType2>::__value
-	 && !__gnu_cxx::__numeric_traits<_ValueType1>::__is_signed
-	 && !__gnu_cxx::__numeric_traits<_ValueType2>::__is_signed
+	(__is_memcmp_ordered_with<_ValueType1, _ValueType2>::__value
 	 && __is_pointer<_II1>::__value
 	 && __is_pointer<_II2>::__value
 #if __cplusplus > 201703L && __cpp_lib_concepts
@@ -1310,6 +1381,67 @@ _GLIBCXX_END_NAMESPACE_CONTAINER
       return std::__lexicographical_compare<__simple>::__lc(__first1, __last1,
 							    __first2, __last2);
     }
+
+  template<typename _Tp1, typename _Ref1, typename _Ptr1,
+	   typename _Tp2>
+    bool
+    __lexicographical_compare_aux1(
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp1, _Ref1, _Ptr1>,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp1, _Ref1, _Ptr1>,
+	_Tp2*, _Tp2*);
+
+  template<typename _Tp1,
+	   typename _Tp2, typename _Ref2, typename _Ptr2>
+    bool
+    __lexicographical_compare_aux1(_Tp1*, _Tp1*,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp2, _Ref2, _Ptr2>,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp2, _Ref2, _Ptr2>);
+
+  template<typename _Tp1, typename _Ref1, typename _Ptr1,
+	   typename _Tp2, typename _Ref2, typename _Ptr2>
+    bool
+    __lexicographical_compare_aux1(
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp1, _Ref1, _Ptr1>,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp1, _Ref1, _Ptr1>,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp2, _Ref2, _Ptr2>,
+	_GLIBCXX_STD_C::_Deque_iterator<_Tp2, _Ref2, _Ptr2>);
+
+  template<typename _II1, typename _II2>
+    _GLIBCXX20_CONSTEXPR
+    inline bool
+    __lexicographical_compare_aux(_II1 __first1, _II1 __last1,
+				  _II2 __first2, _II2 __last2)
+    {
+      return std::__lexicographical_compare_aux1(std::__niter_base(__first1),
+						 std::__niter_base(__last1),
+						 std::__niter_base(__first2),
+						 std::__niter_base(__last2));
+    }
+
+  template<typename _Iter1, typename _Seq1, typename _Cat1,
+	   typename _II2>
+    bool
+    __lexicographical_compare_aux(
+		const ::__gnu_debug::_Safe_iterator<_Iter1, _Seq1, _Cat1>&,
+		const ::__gnu_debug::_Safe_iterator<_Iter1, _Seq1, _Cat1>&,
+		_II2, _II2);
+
+  template<typename _II1,
+	   typename _Iter2, typename _Seq2, typename _Cat2>
+    bool
+    __lexicographical_compare_aux(
+		_II1, _II1,
+		const ::__gnu_debug::_Safe_iterator<_Iter2, _Seq2, _Cat2>&,
+		const ::__gnu_debug::_Safe_iterator<_Iter2, _Seq2, _Cat2>&);
+
+  template<typename _Iter1, typename _Seq1, typename _Cat1,
+	   typename _Iter2, typename _Seq2, typename _Cat2>
+    bool
+    __lexicographical_compare_aux(
+		const ::__gnu_debug::_Safe_iterator<_Iter1, _Seq1, _Cat1>&,
+		const ::__gnu_debug::_Safe_iterator<_Iter1, _Seq1, _Cat1>&,
+		const ::__gnu_debug::_Safe_iterator<_Iter2, _Seq2, _Cat2>&,
+		const ::__gnu_debug::_Safe_iterator<_Iter2, _Seq2, _Cat2>&);
 
   template<typename _ForwardIterator, typename _Tp, typename _Compare>
     _GLIBCXX20_CONSTEXPR
@@ -1610,10 +1742,8 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
       __glibcxx_requires_valid_range(__first1, __last1);
       __glibcxx_requires_valid_range(__first2, __last2);
 
-      return std::__lexicographical_compare_aux(std::__niter_base(__first1),
-						std::__niter_base(__last1),
-						std::__niter_base(__first2),
-						std::__niter_base(__last2));
+      return std::__lexicographical_compare_aux(__first1, __last1,
+						__first2, __last2);
     }
 
   /**
@@ -1651,8 +1781,7 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
   // or std::byte, suitable for comparison by memcmp.
   template<typename _Iter>
     concept __is_byte_iter = contiguous_iterator<_Iter>
-      && __is_byte<iter_value_t<_Iter>>::__value != 0
-      && !__gnu_cxx::__numeric_traits<iter_value_t<_Iter>>::__is_signed;
+      && __is_memcmp_ordered<iter_value_t<_Iter>>::__value;
 
   // Return a struct with two members, initialized to the smaller of x and y
   // (or x if they compare equal) and the result of the comparison x <=> y.
@@ -1958,14 +2087,17 @@ _GLIBCXX_END_NAMESPACE_ALGO
 	  if (__pred(__first))
 	    return __first;
 	  ++__first;
+	  // FALLTHRU
 	case 2:
 	  if (__pred(__first))
 	    return __first;
 	  ++__first;
+	  // FALLTHRU
 	case 1:
 	  if (__pred(__first))
 	    return __first;
 	  ++__first;
+	  // FALLTHRU
 	case 0:
 	default:
 	  return __last;
@@ -1991,6 +2123,26 @@ _GLIBCXX_END_NAMESPACE_ALGO
 	if (__pred(__first))
 	  ++__n;
       return __n;
+    }
+
+  template<typename _ForwardIterator, typename _Predicate>
+    _GLIBCXX20_CONSTEXPR
+    _ForwardIterator
+    __remove_if(_ForwardIterator __first, _ForwardIterator __last,
+		_Predicate __pred)
+    {
+      __first = std::__find_if(__first, __last, __pred);
+      if (__first == __last)
+	return __first;
+      _ForwardIterator __result = __first;
+      ++__first;
+      for (; __first != __last; ++__first)
+	if (!__pred(__first))
+	  {
+	    *__result = _GLIBCXX_MOVE(*__first);
+	    ++__result;
+	  }
+      return __result;
     }
 
 #if __cplusplus >= 201103L

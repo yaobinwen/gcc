@@ -1,7 +1,8 @@
-/* { dg-do run } */
+/* { dg-do run { target { power10_hw } } } */
+/* { dg-do link { target { ! power10_hw } } } */
 /* { dg-require-effective-target lp64 } */
-/* { dg-require-effective-target powerpc_future_hw } */
-/* { dg-options "-mdejagnu-cpu=future" } */
+/* { dg-require-effective-target power10_ok } */
+/* { dg-options "-mdejagnu-cpu=power10" } */
 
 extern void abort (void);
 

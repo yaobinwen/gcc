@@ -1,5 +1,5 @@
 /* Reload pseudo regs into hard regs for insns that require hard regs.
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -395,7 +395,6 @@ static void delete_output_reload (rtx_insn *, int, int, rtx);
 static void delete_address_reloads (rtx_insn *, rtx_insn *);
 static void delete_address_reloads_1 (rtx_insn *, rtx, rtx_insn *);
 static void inc_for_reload (rtx, rtx, rtx, poly_int64);
-static void add_auto_inc_notes (rtx_insn *, rtx);
 static void substitute (rtx *, const_rtx, rtx);
 static bool gen_reload_chain_without_interm_reg_p (int, int);
 static int reloads_conflict (int, int);
@@ -2540,7 +2539,6 @@ eliminate_regs_1 (rtx x, machine_mode mem_mode, rtx insn,
     case SYMBOL_REF:
     case CODE_LABEL:
     case PC:
-    case CC0:
     case ASM_INPUT:
     case ADDR_VEC:
     case ADDR_DIFF_VEC:
@@ -2963,7 +2961,6 @@ elimination_effects (rtx x, machine_mode mem_mode)
     case SYMBOL_REF:
     case CODE_LABEL:
     case PC:
-    case CC0:
     case ASM_INPUT:
     case ADDR_VEC:
     case ADDR_DIFF_VEC:
@@ -4342,7 +4339,6 @@ scan_paradoxical_subregs (rtx x)
     case SYMBOL_REF:
     case LABEL_REF:
     CASE_CONST_ANY:
-    case CC0:
     case PC:
     case USE:
     case CLOBBER:
@@ -7853,7 +7849,7 @@ do_input_reload (class insn_chain *chain, struct reload *rl, int j)
 /* Do output reloading for reload RL, which is for the insn described by
    CHAIN and has the number J.
    ??? At some point we need to support handling output reloads of
-   JUMP_INSNs or insns that set cc0.  */
+   JUMP_INSNs.  */
 static void
 do_output_reload (class insn_chain *chain, struct reload *rl, int j)
 {
@@ -9069,30 +9065,5 @@ inc_for_reload (rtx reloadreg, rtx in, rtx value, poly_int64 inc_amount)
 						GET_MODE (reloadreg))));
       else
 	emit_insn (gen_sub2_insn (reloadreg, inc));
-    }
-}
-
-static void
-add_auto_inc_notes (rtx_insn *insn, rtx x)
-{
-  enum rtx_code code = GET_CODE (x);
-  const char *fmt;
-  int i, j;
-
-  if (code == MEM && auto_inc_p (XEXP (x, 0)))
-    {
-      add_reg_note (insn, REG_INC, XEXP (XEXP (x, 0), 0));
-      return;
-    }
-
-  /* Scan all the operand sub-expressions.  */
-  fmt = GET_RTX_FORMAT (code);
-  for (i = GET_RTX_LENGTH (code) - 1; i >= 0; i--)
-    {
-      if (fmt[i] == 'e')
-	add_auto_inc_notes (insn, XEXP (x, i));
-      else if (fmt[i] == 'E')
-	for (j = XVECLEN (x, i) - 1; j >= 0; j--)
-	  add_auto_inc_notes (insn, XVECEXP (x, i, j));
     }
 }

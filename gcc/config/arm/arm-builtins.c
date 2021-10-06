@@ -1,5 +1,5 @@
 /* Description of builtins used by the ARM backend.
-   Copyright (C) 2014-2020 Free Software Foundation, Inc.
+   Copyright (C) 2014-2021 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -43,6 +43,8 @@
 #include "sbitmap.h"
 #include "stringpool.h"
 #include "arm-builtins.h"
+#include "stringpool.h"
+#include "attribs.h"
 
 #define SIMD_MAX_BUILTIN_ARGS 7
 
@@ -809,23 +811,23 @@ arm_ldrgbwbu_z_qualifiers[SIMD_MAX_BUILTIN_ARGS]
 
 static enum arm_type_qualifiers
 arm_strsbwbs_qualifiers[SIMD_MAX_BUILTIN_ARGS]
-  = { qualifier_void, qualifier_unsigned, qualifier_const, qualifier_none};
+  = { qualifier_unsigned, qualifier_unsigned, qualifier_const, qualifier_none};
 #define STRSBWBS_QUALIFIERS (arm_strsbwbs_qualifiers)
 
 static enum arm_type_qualifiers
 arm_strsbwbu_qualifiers[SIMD_MAX_BUILTIN_ARGS]
-  = { qualifier_void, qualifier_unsigned, qualifier_const, qualifier_unsigned};
+  = { qualifier_unsigned, qualifier_unsigned, qualifier_const, qualifier_unsigned};
 #define STRSBWBU_QUALIFIERS (arm_strsbwbu_qualifiers)
 
 static enum arm_type_qualifiers
 arm_strsbwbs_p_qualifiers[SIMD_MAX_BUILTIN_ARGS]
-  = { qualifier_void, qualifier_unsigned, qualifier_const,
+  = { qualifier_unsigned, qualifier_unsigned, qualifier_const,
       qualifier_none, qualifier_unsigned};
 #define STRSBWBS_P_QUALIFIERS (arm_strsbwbs_p_qualifiers)
 
 static enum arm_type_qualifiers
 arm_strsbwbu_p_qualifiers[SIMD_MAX_BUILTIN_ARGS]
-  = { qualifier_void, qualifier_unsigned, qualifier_const,
+  = { qualifier_unsigned, qualifier_unsigned, qualifier_const,
       qualifier_unsigned, qualifier_unsigned};
 #define STRSBWBU_P_QUALIFIERS (arm_strsbwbu_p_qualifiers)
 
@@ -944,6 +946,9 @@ typedef struct {
 #define VAR13(T, N, A, B, C, D, E, F, G, H, I, J, K, L, M) \
   VAR12 (T, N, A, B, C, D, E, F, G, H, I, J, K, L) \
   VAR1 (T, N, M)
+#define VAR14(T, N, A, B, C, D, E, F, G, H, I, J, K, L, M, O) \
+  VAR13 (T, N, A, B, C, D, E, F, G, H, I, J, K, L, M) \
+  VAR1 (T, N, O)
 
 /* The builtin data can be found in arm_neon_builtins.def, arm_vfp_builtins.def
    and arm_acle_builtins.def.  The entries in arm_neon_builtins.def require
@@ -1457,18 +1462,12 @@ arm_mangle_builtin_scalar_type (const_tree type)
 static const char *
 arm_mangle_builtin_vector_type (const_tree type)
 {
-  int i;
-  int nelts = sizeof (arm_simd_types) / sizeof (arm_simd_types[0]);
-
-  for (i = 0; i < nelts; i++)
-    if (arm_simd_types[i].mode ==  TYPE_MODE (type)
-	&& TYPE_NAME (type)
-	&& TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
-	&& DECL_NAME (TYPE_NAME (type))
-	&& !strcmp
-	     (IDENTIFIER_POINTER (DECL_NAME (TYPE_NAME (type))),
-	      arm_simd_types[i].name))
-      return arm_simd_types[i].mangle;
+  tree attrs = TYPE_ATTRIBUTES (type);
+  if (tree attr = lookup_attribute ("Advanced SIMD type", attrs))
+    {
+      tree mangled_name = TREE_VALUE (TREE_VALUE (attr));
+      return IDENTIFIER_POINTER (mangled_name);
+    }
 
   return NULL;
 }
@@ -1642,9 +1641,18 @@ arm_init_simd_builtin_types (void)
       if (eltype == NULL)
 	continue;
       if (arm_simd_types[i].itype == NULL)
-	arm_simd_types[i].itype =
-	  build_distinct_type_copy
-	    (build_vector_type (eltype, GET_MODE_NUNITS (mode)));
+	{
+	  tree type = build_vector_type (eltype, GET_MODE_NUNITS (mode));
+	  type = build_distinct_type_copy (type);
+	  SET_TYPE_STRUCTURAL_EQUALITY (type);
+
+	  tree mangled_name = get_identifier (arm_simd_types[i].mangle);
+	  tree value = tree_cons (NULL_TREE, mangled_name, NULL_TREE);
+	  TYPE_ATTRIBUTES (type)
+	    = tree_cons (get_identifier ("Advanced SIMD type"), value,
+			 TYPE_ATTRIBUTES (type));
+	  arm_simd_types[i].itype = type;
+	}
 
       tdecl = add_builtin_type (arm_simd_types[i].name,
 				arm_simd_types[i].itype);
@@ -3084,26 +3092,30 @@ constant_arg:
 			  unsigned int cp_bit = (CONST_INT_P (op[argc])
 						 ? UINTVAL (op[argc]) : -1);
 			  if (IN_RANGE (cp_bit, 0, ARM_CDE_CONST_COPROC))
-			    error ("%Kcoprocessor %d is not enabled "
-				   "with +cdecp%d", exp, cp_bit, cp_bit);
+			    error_at (EXPR_LOCATION (exp),
+				      "coprocessor %d is not enabled "
+				      "with +cdecp%d", cp_bit, cp_bit);
 			  else
-			    error ("%Kcoproc must be a constant immediate in "
-				   "range [0-%d] enabled with +cdecp<N>", exp,
-				   ARM_CDE_CONST_COPROC);
+			    error_at (EXPR_LOCATION (exp),
+				      "coproc must be a constant immediate in "
+				      "range [0-%d] enabled with +cdecp<N>",
+				      ARM_CDE_CONST_COPROC);
 			}
 		      else
 			/* Here we mention the builtin name to follow the same
 			   format that the C/C++ frontends use for referencing
 			   a given argument index.  */
-			error ("%Kargument %d to %qE must be a constant immediate "
-			       "in range [0-%d]", exp, argc + 1,
+			error_at (EXPR_LOCATION (exp),
+				  "argument %d to %qE must be a constant "
+				  "immediate in range [0-%d]", argc + 1,
 			       arm_builtin_decls[fcode],
 			       cde_builtin_data[fcode -
 			       ARM_BUILTIN_CDE_PATTERN_START].imm_max);
 		    }
 		  else
-		    error ("%Kargument %d must be a constant immediate",
-			   exp, argc + 1);
+		    error_at (EXPR_LOCATION (exp),
+			      "argument %d must be a constant immediate",
+			      argc + 1);
 		  /* We have failed to expand the pattern, and are safely
 		     in to invalid code.  But the mid-end will still try to
 		     build an assignment for this node while it expands,
@@ -3320,11 +3332,13 @@ arm_expand_acle_builtin (int fcode, tree exp, rtx target)
       if (CONST_INT_P (sat_imm))
 	{
 	  if (!IN_RANGE (sat_imm, min_sat, max_sat))
-	    error ("%Ksaturation bit range must be in the range [%wd, %wd]",
-		   exp, UINTVAL (min_sat), UINTVAL (max_sat));
+	    error_at (EXPR_LOCATION (exp),
+		      "saturation bit range must be in the range [%wd, %wd]",
+		      UINTVAL (min_sat), UINTVAL (max_sat));
 	}
       else
-	error ("%Ksaturation bit range must be a constant immediate", exp);
+	error_at (EXPR_LOCATION (exp),
+		  "saturation bit range must be a constant immediate");
       /* Don't generate any RTL.  */
       return const0_rtx;
     }
@@ -3447,7 +3461,8 @@ arm_expand_builtin (tree exp,
       if (CONST_INT_P (lane_idx))
 	neon_lane_bounds (lane_idx, 0, TREE_INT_CST_LOW (nlanes), exp);
       else
-	error ("%Klane index must be a constant immediate", exp);
+	error_at (EXPR_LOCATION (exp),
+		  "lane index must be a constant immediate");
       /* Don't generate any RTL.  */
       return const0_rtx;
     }

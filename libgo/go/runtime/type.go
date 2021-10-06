@@ -24,6 +24,10 @@ const (
 	tflagRegularMemory tflag = 1 << 3 // equal and hash can treat values of this type as a single region of t.size bytes
 )
 
+// Needs to be in sync with
+// go/types.cc
+// ../reflect/type.go:/^type.rtype.
+// ../internal/reflectlite/type.go:/^type.rtype.
 type _type struct {
 	size       uintptr
 	ptrdata    uintptr
@@ -45,7 +49,24 @@ type _type struct {
 }
 
 func (t *_type) string() string {
-	return *t._string
+	// For gccgo, try to strip out quoted strings.
+	s := *t._string
+	q := false
+	started := false
+	var start int
+	var end int
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\t' {
+			q = !q
+		} else if !q {
+			if !started {
+				start = i
+				started = true
+			}
+			end = i
+		}
+	}
+	return s[start : end+1]
 }
 
 // pkgpath returns the path of the package where t was defined, if
@@ -101,7 +122,7 @@ type maptype struct {
 }
 
 // Note: flag values must match those used in the TMAP case
-// in ../cmd/compile/internal/gc/reflect.go:dtypesym.
+// in ../cmd/compile/internal/reflectdata/reflect.go:writeType.
 func (mt *maptype) indirectkey() bool { // store ptr to key instead of key itself
 	return mt.flags&1 != 0
 }

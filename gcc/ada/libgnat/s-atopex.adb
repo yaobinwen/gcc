@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---                 Copyright (C) 2019, Free Software Foundation, Inc.       --
+--                 Copyright (C) 2019-2021, Free Software Foundation, Inc.  --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -66,7 +66,7 @@ package body System.Atomic_Operations.Exchange is
       pragma Warnings (On);
 
    begin
-      case Item'Size is
+      case Atomic_Type'Object_Size is
          when 8      => return Atomic_Exchange_1 (Item'Address, Value);
          when 16     => return Atomic_Exchange_2 (Item'Address, Value);
          when 32     => return Atomic_Exchange_4 (Item'Address, Value);
@@ -89,58 +89,54 @@ package body System.Atomic_Operations.Exchange is
         (Ptr           : System.Address;
          Expected      : System.Address;
          Desired       : Atomic_Type;
-         Weak          : bool := False;
+         Weak          : Boolean := False;
          Success_Model : Mem_Model := Seq_Cst;
-         Failure_Model : Mem_Model := Seq_Cst) return bool;
+         Failure_Model : Mem_Model := Seq_Cst) return Boolean;
       pragma Import
         (Intrinsic, Atomic_Compare_Exchange_1, "__atomic_compare_exchange_1");
       function Atomic_Compare_Exchange_2
         (Ptr           : System.Address;
          Expected      : System.Address;
          Desired       : Atomic_Type;
-         Weak          : bool := False;
+         Weak          : Boolean := False;
          Success_Model : Mem_Model := Seq_Cst;
-         Failure_Model : Mem_Model := Seq_Cst) return bool;
+         Failure_Model : Mem_Model := Seq_Cst) return Boolean;
       pragma Import
         (Intrinsic, Atomic_Compare_Exchange_2, "__atomic_compare_exchange_2");
       function Atomic_Compare_Exchange_4
         (Ptr           : System.Address;
          Expected      : System.Address;
          Desired       : Atomic_Type;
-         Weak          : bool := False;
+         Weak          : Boolean := False;
          Success_Model : Mem_Model := Seq_Cst;
-         Failure_Model : Mem_Model := Seq_Cst) return bool;
+         Failure_Model : Mem_Model := Seq_Cst) return Boolean;
       pragma Import
         (Intrinsic, Atomic_Compare_Exchange_4, "__atomic_compare_exchange_4");
       function Atomic_Compare_Exchange_8
         (Ptr           : System.Address;
          Expected      : System.Address;
          Desired       : Atomic_Type;
-         Weak          : bool := False;
+         Weak          : Boolean := False;
          Success_Model : Mem_Model := Seq_Cst;
-         Failure_Model : Mem_Model := Seq_Cst) return bool;
+         Failure_Model : Mem_Model := Seq_Cst) return Boolean;
       pragma Import
         (Intrinsic, Atomic_Compare_Exchange_8, "__atomic_compare_exchange_8");
       pragma Warnings (On);
 
    begin
-      case Item'Size is
+      case Atomic_Type'Object_Size is
          when 8 =>
-            return Boolean
-              (Atomic_Compare_Exchange_1
-                (Item'Address, Prior'Address, Desired));
+            return
+              Atomic_Compare_Exchange_1 (Item'Address, Prior'Address, Desired);
          when 16 =>
-            return Boolean
-              (Atomic_Compare_Exchange_2
-                (Item'Address, Prior'Address, Desired));
+            return
+              Atomic_Compare_Exchange_2 (Item'Address, Prior'Address, Desired);
          when 32 =>
-            return Boolean
-              (Atomic_Compare_Exchange_4
-                (Item'Address, Prior'Address, Desired));
+            return
+              Atomic_Compare_Exchange_4 (Item'Address, Prior'Address, Desired);
          when 64 =>
-            return Boolean
-              (Atomic_Compare_Exchange_8
-                (Item'Address, Prior'Address, Desired));
+            return
+              Atomic_Compare_Exchange_8 (Item'Address, Prior'Address, Desired);
          when others =>
             raise Program_Error;
       end case;
@@ -151,9 +147,10 @@ package body System.Atomic_Operations.Exchange is
    ------------------
 
    function Is_Lock_Free (Item : aliased Atomic_Type) return Boolean is
+      pragma Unreferenced (Item);
       use type Interfaces.C.size_t;
    begin
-      return Boolean (Atomic_Always_Lock_Free (Item'Size / 8));
+      return Atomic_Always_Lock_Free (Atomic_Type'Object_Size / 8);
    end Is_Lock_Free;
 
 end System.Atomic_Operations.Exchange;

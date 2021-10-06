@@ -1,7 +1,8 @@
 /* { dg-do compile } */
-/* { dg-options "-O2 -fdump-tree-thread1-details -fdump-tree-thread2-details" } */
-/* { dg-final { scan-tree-dump-times "FSM" 3 "thread1" } } */
-/* { dg-final { scan-tree-dump-times "FSM" 5 "thread2" } } */
+/* { dg-options "-O2 -fdump-tree-thread1-details -fdump-tree-thread3-details" } */
+
+/* { dg-final { scan-tree-dump-times "Registering jump" 6 "thread1" } } */
+/* { dg-final { scan-tree-dump-times "Registering jump" 1 "thread3" } } */
 
 int sum0, sum1, sum2, sum3;
 int foo (char *s, char **ret)

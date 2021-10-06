@@ -14,7 +14,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,9 +37,16 @@ var (
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to this file")
 )
 
+// Keep these in sync with go/format/format.go.
 const (
 	tabWidth    = 8
-	printerMode = printer.UseSpaces | printer.TabIndent
+	printerMode = printer.UseSpaces | printer.TabIndent | printerNormalizeNumbers
+
+	// printerNormalizeNumbers means to canonicalize number literal prefixes
+	// and exponents while printing. See https://golang.org/doc/go1.13#gofmt.
+	//
+	// This value is defined in go/printer specifically for go/format and cmd/gofmt.
+	printerNormalizeNumbers = 1 << 30
 )
 
 var (
@@ -66,7 +73,7 @@ func initParserMode() {
 	}
 }
 
-func isGoFile(f os.FileInfo) bool {
+func isGoFile(f fs.DirEntry) bool {
 	// ignore non-Go files
 	name := f.Name()
 	return !f.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
@@ -74,7 +81,7 @@ func isGoFile(f os.FileInfo) bool {
 
 // If in == nil, the source is the contents of the file with the given filename.
 func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error {
-	var perm os.FileMode = 0644
+	var perm fs.FileMode = 0644
 	if in == nil {
 		f, err := os.Open(filename)
 		if err != nil {
@@ -89,7 +96,7 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 		perm = fi.Mode().Perm()
 	}
 
-	src, err := ioutil.ReadAll(in)
+	src, err := io.ReadAll(in)
 	if err != nil {
 		return err
 	}
@@ -113,8 +120,6 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 		simplify(file)
 	}
 
-	ast.Inspect(file, normalizeNumbers)
-
 	res, err := format(fileSet, file, sourceAdj, indentAdj, src, printer.Config{Mode: printerMode, Tabwidth: tabWidth})
 	if err != nil {
 		return err
@@ -131,7 +136,7 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 			if err != nil {
 				return err
 			}
-			err = ioutil.WriteFile(filename, res, perm)
+			err = os.WriteFile(filename, res, perm)
 			if err != nil {
 				os.Rename(bakname, filename)
 				return err
@@ -146,7 +151,7 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 			if err != nil {
 				return fmt.Errorf("computing diff: %s", err)
 			}
-			fmt.Printf("diff -u %s %s\n", filepath.ToSlash(filename+".orig"), filepath.ToSlash(filename))
+			fmt.Fprintf(out, "diff -u %s %s\n", filepath.ToSlash(filename+".orig"), filepath.ToSlash(filename))
 			out.Write(data)
 		}
 	}
@@ -158,20 +163,14 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 	return err
 }
 
-func visitFile(path string, f os.FileInfo, err error) error {
-	if err == nil && isGoFile(f) {
-		err = processFile(path, nil, os.Stdout, false)
+func visitFile(path string, f fs.DirEntry, err error) error {
+	if err != nil || !isGoFile(f) {
+		return err
 	}
-	// Don't complain if a file was deleted in the meantime (i.e.
-	// the directory changed concurrently while running gofmt).
-	if err != nil && !os.IsNotExist(err) {
+	if err := processFile(path, nil, os.Stdout, false); err != nil {
 		report(err)
 	}
 	return nil
-}
-
-func walkDir(path string) {
-	filepath.Walk(path, visitFile)
 }
 
 func main() {
@@ -201,7 +200,8 @@ func gofmtMain() {
 	initParserMode()
 	initRewrite()
 
-	if flag.NArg() == 0 {
+	args := flag.Args()
+	if len(args) == 0 {
 		if *write {
 			fmt.Fprintln(os.Stderr, "error: cannot use -w with standard input")
 			exitCode = 2
@@ -213,15 +213,18 @@ func gofmtMain() {
 		return
 	}
 
-	for i := 0; i < flag.NArg(); i++ {
-		path := flag.Arg(i)
-		switch dir, err := os.Stat(path); {
+	for _, arg := range args {
+		switch info, err := os.Stat(arg); {
 		case err != nil:
 			report(err)
-		case dir.IsDir():
-			walkDir(path)
+		case !info.IsDir():
+			// Non-directory arguments are always formatted.
+			if err := processFile(arg, nil, os.Stdout, false); err != nil {
+				report(err)
+			}
 		default:
-			if err := processFile(path, nil, os.Stdout, false); err != nil {
+			// Directories are walked, ignoring non-Go files.
+			if err := filepath.WalkDir(arg, visitFile); err != nil {
 				report(err)
 			}
 		}
@@ -270,9 +273,9 @@ const chmodSupported = runtime.GOOS != "windows"
 // backupFile writes data to a new file named filename<number> with permissions perm,
 // with <number randomly chosen such that the file name is unique. backupFile returns
 // the chosen file name.
-func backupFile(filename string, data []byte, perm os.FileMode) (string, error) {
+func backupFile(filename string, data []byte, perm fs.FileMode) (string, error) {
 	// create backup file
-	f, err := ioutil.TempFile(filepath.Dir(filename), filepath.Base(filename))
+	f, err := os.CreateTemp(filepath.Dir(filename), filepath.Base(filename))
 	if err != nil {
 		return "", err
 	}
@@ -293,57 +296,4 @@ func backupFile(filename string, data []byte, perm os.FileMode) (string, error) 
 	}
 
 	return bakname, err
-}
-
-// normalizeNumbers rewrites base prefixes and exponents to
-// use lower-case letters, and removes leading 0's from
-// integer imaginary literals. It leaves hexadecimal digits
-// alone.
-func normalizeNumbers(n ast.Node) bool {
-	lit, _ := n.(*ast.BasicLit)
-	if lit == nil || (lit.Kind != token.INT && lit.Kind != token.FLOAT && lit.Kind != token.IMAG) {
-		return true
-	}
-	if len(lit.Value) < 2 {
-		return false // only one digit (common case) - nothing to do
-	}
-	// len(lit.Value) >= 2
-
-	// We ignore lit.Kind because for lit.Kind == token.IMAG the literal may be an integer
-	// or floating-point value, decimal or not. Instead, just consider the literal pattern.
-	x := lit.Value
-	switch x[:2] {
-	default:
-		// 0-prefix octal, decimal int, or float (possibly with 'i' suffix)
-		if i := strings.LastIndexByte(x, 'E'); i >= 0 {
-			x = x[:i] + "e" + x[i+1:]
-			break
-		}
-		// remove leading 0's from integer (but not floating-point) imaginary literals
-		if x[len(x)-1] == 'i' && strings.IndexByte(x, '.') < 0 && strings.IndexByte(x, 'e') < 0 {
-			x = strings.TrimLeft(x, "0_")
-			if x == "i" {
-				x = "0i"
-			}
-		}
-	case "0X":
-		x = "0x" + x[2:]
-		fallthrough
-	case "0x":
-		// possibly a hexadecimal float
-		if i := strings.LastIndexByte(x, 'P'); i >= 0 {
-			x = x[:i] + "p" + x[i+1:]
-		}
-	case "0O":
-		x = "0o" + x[2:]
-	case "0o":
-		// nothing to do
-	case "0B":
-		x = "0b" + x[2:]
-	case "0b":
-		// nothing to do
-	}
-
-	lit.Value = x
-	return false
 }

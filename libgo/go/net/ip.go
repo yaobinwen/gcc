@@ -12,7 +12,10 @@
 
 package net
 
-import "internal/bytealg"
+import (
+	"internal/bytealg"
+	"internal/itoa"
+)
 
 // IP address lengths (bytes).
 const (
@@ -123,6 +126,25 @@ func (ip IP) IsLoopback() bool {
 		return ip4[0] == 127
 	}
 	return ip.Equal(IPv6loopback)
+}
+
+// IsPrivate reports whether ip is a private address, according to
+// RFC 1918 (IPv4 addresses) and RFC 4193 (IPv6 addresses).
+func (ip IP) IsPrivate() bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		// Following RFC 1918, Section 3. Private Address Space which says:
+		//   The Internet Assigned Numbers Authority (IANA) has reserved the
+		//   following three blocks of the IP address space for private internets:
+		//     10.0.0.0        -   10.255.255.255  (10/8 prefix)
+		//     172.16.0.0      -   172.31.255.255  (172.16/12 prefix)
+		//     192.168.0.0     -   192.168.255.255 (192.168/16 prefix)
+		return ip4[0] == 10 ||
+			(ip4[0] == 172 && ip4[1]&0xf0 == 16) ||
+			(ip4[0] == 192 && ip4[1] == 168)
+	}
+	// Following RFC 4193, Section 8. IANA Considerations which says:
+	//   The IANA has assigned the FC00::/7 prefix to "Unique Local Unicast".
+	return len(ip) == IPv6len && ip[0]&0xfe == 0xfc
 }
 
 // IsMulticast reports whether ip is a multicast address.
@@ -531,7 +553,7 @@ func (n *IPNet) String() string {
 	if l == -1 {
 		return nn.String() + "/" + m.String()
 	}
-	return nn.String() + "/" + uitoa(uint(l))
+	return nn.String() + "/" + itoa.Uitoa(uint(l))
 }
 
 // Parse IPv4 address (d.d.d.d).
@@ -550,6 +572,10 @@ func parseIPv4(s string) IP {
 		}
 		n, c, ok := dtoi(s)
 		if !ok || n > 0xFF {
+			return nil
+		}
+		if c > 1 && s[0] == '0' {
+			// Reject non-zero components with leading zeroes.
 			return nil
 		}
 		s = s[c:]
@@ -671,8 +697,8 @@ func parseIPv6(s string) (ip IP) {
 }
 
 // ParseIP parses s as an IP address, returning the result.
-// The string s can be in dotted decimal ("192.0.2.1")
-// or IPv6 ("2001:db8::68") form.
+// The string s can be in IPv4 dotted decimal ("192.0.2.1"), IPv6
+// ("2001:db8::68"), or IPv4-mapped IPv6 ("::ffff:192.0.2.1") form.
 // If s is not a valid textual representation of an IP address,
 // ParseIP returns nil.
 func ParseIP(s string) IP {

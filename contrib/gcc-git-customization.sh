@@ -26,16 +26,18 @@ git config alias.gcc-descr \!"f() { if test \${1:-no} = --full; then c=\${2:-mas
 git config alias.gcc-undescr \!"f() { o=\$(git config --get gcc-config.upstream); r=\$(echo \$1 | sed -n 's,^r\\([0-9]\\+\\)-[0-9]\\+\$,\\1,p'); n=\$(echo \$1 | sed -n 's,^r[0-9]\\+-\\([0-9]\\+\\)\$,\\1,p'); test -z \$r && echo Invalid id \$1 && exit 1; h=\$(git rev-parse --verify --quiet \${o:-origin}/releases/gcc-\$r); test -z \$h && h=\$(git rev-parse --verify --quiet \${o:-origin}/master); p=\$(git describe --all --match 'basepoints/gcc-'\$r \$h | sed -n 's,^\\(tags/\\)\\?basepoints/gcc-[0-9]\\+-\\([0-9]\\+\\)-g[0-9a-f]*\$,\\2,p;s,^\\(tags/\\)\\?basepoints/gcc-[0-9]\\+\$,0,p'); git rev-parse --verify \$h~\$(expr \$p - \$n); }; f"
 
 git config alias.gcc-verify '!f() { "`git rev-parse --show-toplevel`/contrib/gcc-changelog/git_check_commit.py" $@; } ; f'
-git config alias.gcc-backport '!f() { rev=$1; git cherry-pick -x $@; } ; f'
-
+git config alias.gcc-backport '!f() { "`git rev-parse --show-toplevel`/contrib/git-backport.py" $@; } ; f'
 git config alias.gcc-mklog '!f() { "`git rev-parse --show-toplevel`/contrib/mklog.py" $@; } ; f'
-
-git config alias.commit-mklog '!f() { GCC_FORCE_MKLOG=1 git commit "$@"; }; f'
+git config alias.gcc-commit-mklog '!f() { "`git rev-parse --show-toplevel`/contrib/git-commit-mklog.py" "$@"; }; f'
 
 # Make diff on MD files use "(define" as a function marker.
 # Use this in conjunction with a .gitattributes file containing
 # *.md    diff=md
 git config diff.md.xfuncname '^\(define.*$'
+
+# Tell git send-email where patches go.
+# ??? Maybe also set sendemail.tocmd to guess from MAINTAINERS?
+git config sendemail.to 'gcc-patches@gcc.gnu.org'
 
 set_user=$(git config --get "user.name")
 set_email=$(git config --get "user.email")

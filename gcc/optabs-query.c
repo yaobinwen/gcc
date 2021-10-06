@@ -1,5 +1,5 @@
 /* IR-agnostic target query functions relating to optabs
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -582,28 +582,46 @@ can_vec_mask_load_store_p (machine_mode mode,
     return false;
 
   vmode = targetm.vectorize.preferred_simd_mode (smode);
-  if (!VECTOR_MODE_P (vmode))
-    return false;
-
-  if (targetm.vectorize.get_mask_mode (vmode).exists (&mask_mode)
+  if (VECTOR_MODE_P (vmode)
+      && targetm.vectorize.get_mask_mode (vmode).exists (&mask_mode)
       && convert_optab_handler (op, vmode, mask_mode) != CODE_FOR_nothing)
     return true;
 
   auto_vector_modes vector_modes;
   targetm.vectorize.autovectorize_vector_modes (&vector_modes, true);
-  for (unsigned int i = 0; i < vector_modes.length (); ++i)
-    {
-      poly_uint64 cur = GET_MODE_SIZE (vector_modes[i]);
-      poly_uint64 nunits;
-      if (!multiple_p (cur, GET_MODE_SIZE (smode), &nunits))
-	continue;
-      if (mode_for_vector (smode, nunits).exists (&vmode)
-	  && VECTOR_MODE_P (vmode)
-	  && targetm.vectorize.get_mask_mode (vmode).exists (&mask_mode)
-	  && convert_optab_handler (op, vmode, mask_mode) != CODE_FOR_nothing)
-	return true;
-    }
+  for (machine_mode base_mode : vector_modes)
+    if (related_vector_mode (base_mode, smode).exists (&vmode)
+	&& targetm.vectorize.get_mask_mode (vmode).exists (&mask_mode)
+	&& convert_optab_handler (op, vmode, mask_mode) != CODE_FOR_nothing)
+      return true;
   return false;
+}
+
+/* If target supports vector load/store with length for vector mode MODE,
+   return the corresponding vector mode, otherwise return opt_machine_mode ().
+   There are two flavors for vector load/store with length, one is to measure
+   length with bytes, the other is to measure length with lanes.
+   As len_{load,store} optabs point out, for the flavor with bytes, we use
+   VnQI to wrap the other supportable same size vector modes.  */
+
+opt_machine_mode
+get_len_load_store_mode (machine_mode mode, bool is_load)
+{
+  optab op = is_load ? len_load_optab : len_store_optab;
+  gcc_assert (VECTOR_MODE_P (mode));
+
+  /* Check if length in lanes supported for this mode directly.  */
+  if (direct_optab_handler (op, mode))
+    return mode;
+
+  /* Check if length in bytes supported for same vector size VnQI.  */
+  machine_mode vmode;
+  poly_uint64 nunits = GET_MODE_SIZE (mode);
+  if (related_vector_mode (mode, QImode, nunits).exists (&vmode)
+      && direct_optab_handler (op, vmode))
+    return vmode;
+
+  return opt_machine_mode ();
 }
 
 /* Return true if there is a compare_and_swap pattern.  */
@@ -722,7 +740,8 @@ supports_vec_gather_load_p ()
   this_fn_optabs->supports_vec_gather_load_cached = true;
 
   this_fn_optabs->supports_vec_gather_load
-    = supports_vec_convert_optab_p (gather_load_optab);
+    = (supports_vec_convert_optab_p (gather_load_optab)
+       || supports_vec_convert_optab_p (mask_gather_load_optab));
 
   return this_fn_optabs->supports_vec_gather_load;
 }
@@ -739,7 +758,8 @@ supports_vec_scatter_store_p ()
   this_fn_optabs->supports_vec_scatter_store_cached = true;
 
   this_fn_optabs->supports_vec_scatter_store
-    = supports_vec_convert_optab_p (scatter_store_optab);
+    = (supports_vec_convert_optab_p (scatter_store_optab)
+       || supports_vec_convert_optab_p (mask_scatter_store_optab));
 
   return this_fn_optabs->supports_vec_scatter_store;
 }

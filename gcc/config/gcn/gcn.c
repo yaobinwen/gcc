@@ -1,4 +1,4 @@
-/* Copyright (C) 2016-2020 Free Software Foundation, Inc.
+/* Copyright (C) 2016-2021 Free Software Foundation, Inc.
 
    This file is free software; you can redistribute it and/or modify it under
    the terms of the GNU General Public License as published by the Free
@@ -50,6 +50,8 @@
 #include "varasm.h"
 #include "intl.h"
 #include "rtl-iter.h"
+#include "dwarf2.h"
+#include "gimple.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -72,18 +74,25 @@ int gcn_isa = 3;		/* Default to GCN3.  */
  
    We want to permit full occupancy, so size accordingly.  */
 
+/* Use this as a default, but allow it to grow if the user requests a large
+   amount of gang-private shared-memory space.  */
+static int acc_lds_size = 0x600;
+
 #define OMP_LDS_SIZE 0x600    /* 0x600 is 1/40 total, rounded down.  */
-#define ACC_LDS_SIZE 32768    /* Half of the total should be fine.  */
+#define ACC_LDS_SIZE acc_lds_size
 #define OTHER_LDS_SIZE 65536  /* If in doubt, reserve all of it.  */
 
 #define LDS_SIZE (flag_openacc ? ACC_LDS_SIZE \
 		  : flag_openmp ? OMP_LDS_SIZE \
 		  : OTHER_LDS_SIZE)
 
+static int gang_private_hwm = 32;
+static hash_map<tree, int> lds_allocs;
+
 /* The number of registers usable by normal non-kernel functions.
    The SGPR count includes any special extra registers such as VCC.  */
 
-#define MAX_NORMAL_SGPR_COUNT	64
+#define MAX_NORMAL_SGPR_COUNT	62  // i.e. 64 with VCC
 #define MAX_NORMAL_VGPR_COUNT	24
 
 /* }}}  */
@@ -97,13 +106,6 @@ gcn_init_machine_status (void)
   struct machine_function *f;
 
   f = ggc_cleared_alloc<machine_function> ();
-
-  /* Set up LDS allocation for broadcasting for this function.  */
-  f->lds_allocated = 32;
-  f->lds_allocs = hash_map<tree, int>::create_ggc (64);
-
-  /* And LDS temporary decls for worker reductions.  */
-  vec_alloc (f->reduc_decls, 0);
 
   if (TARGET_GCN3)
     f->use_flat_addressing = true;
@@ -127,7 +129,7 @@ gcn_option_override (void)
   if (!flag_pic)
     flag_pic = flag_pie;
 
-  gcn_isa = gcn_arch == PROCESSOR_VEGA ? 5 : 3;
+  gcn_isa = gcn_arch == PROCESSOR_FIJI ? 3 : 5;
 
   /* The default stack size needs to be small for offload kernels because
      there may be many, many threads.  Also, a smaller stack gives a
@@ -143,6 +145,28 @@ gcn_option_override (void)
 	/* 1MB total.  */
 	stack_size_opt = 1048576;
     }
+
+  /* Reserve 1Kb (somewhat arbitrarily) of LDS space for reduction results and
+     worker broadcasts.  */
+  if (gang_private_size_opt == -1)
+    gang_private_size_opt = 512;
+  else if (gang_private_size_opt < gang_private_hwm)
+    gang_private_size_opt = gang_private_hwm;
+  else if (gang_private_size_opt >= acc_lds_size - 1024)
+    {
+      /* We need some space for reductions and worker broadcasting.  If the
+	 user requests a large amount of gang-private LDS space, we might not
+	 have enough left for the former.  Increase the LDS allocation in that
+	 case, although this may reduce the maximum occupancy on the
+	 hardware.  */
+      acc_lds_size = gang_private_size_opt + 1024;
+      if (acc_lds_size > 32768)
+	acc_lds_size = 32768;
+    }
+
+  /* The xnack option is a placeholder, for now.  */
+  if (flag_xnack)
+    sorry ("XNACK support");
 }
 
 /* }}}  */
@@ -168,37 +192,31 @@ static const struct gcn_kernel_arg_type
   {"exec", NULL, DImode, EXEC_REG},
 #define PRIVATE_SEGMENT_BUFFER_ARG 1
   {"private_segment_buffer",
-    "enable_sgpr_private_segment_buffer", TImode, -1},
+    ".amdhsa_user_sgpr_private_segment_buffer", TImode, -1},
 #define DISPATCH_PTR_ARG 2
-  {"dispatch_ptr", "enable_sgpr_dispatch_ptr", DImode, -1},
+  {"dispatch_ptr", ".amdhsa_user_sgpr_dispatch_ptr", DImode, -1},
 #define QUEUE_PTR_ARG 3
-  {"queue_ptr", "enable_sgpr_queue_ptr", DImode, -1},
+  {"queue_ptr", ".amdhsa_user_sgpr_queue_ptr", DImode, -1},
 #define KERNARG_SEGMENT_PTR_ARG 4
-  {"kernarg_segment_ptr", "enable_sgpr_kernarg_segment_ptr", DImode, -1},
-  {"dispatch_id", "enable_sgpr_dispatch_id", DImode, -1},
+  {"kernarg_segment_ptr", ".amdhsa_user_sgpr_kernarg_segment_ptr", DImode, -1},
+  {"dispatch_id", ".amdhsa_user_sgpr_dispatch_id", DImode, -1},
 #define FLAT_SCRATCH_INIT_ARG 6
-  {"flat_scratch_init", "enable_sgpr_flat_scratch_init", DImode, -1},
+  {"flat_scratch_init", ".amdhsa_user_sgpr_flat_scratch_init", DImode, -1},
 #define FLAT_SCRATCH_SEGMENT_SIZE_ARG 7
-  {"private_segment_size", "enable_sgpr_private_segment_size", SImode, -1},
-  {"grid_workgroup_count_X",
-    "enable_sgpr_grid_workgroup_count_x", SImode, -1},
-  {"grid_workgroup_count_Y",
-    "enable_sgpr_grid_workgroup_count_y", SImode, -1},
-  {"grid_workgroup_count_Z",
-    "enable_sgpr_grid_workgroup_count_z", SImode, -1},
-#define WORKGROUP_ID_X_ARG 11
-  {"workgroup_id_X", "enable_sgpr_workgroup_id_x", SImode, -2},
-  {"workgroup_id_Y", "enable_sgpr_workgroup_id_y", SImode, -2},
-  {"workgroup_id_Z", "enable_sgpr_workgroup_id_z", SImode, -2},
-  {"workgroup_info", "enable_sgpr_workgroup_info", SImode, -1},
-#define PRIVATE_SEGMENT_WAVE_OFFSET_ARG 15
+  {"private_segment_size", ".amdhsa_user_sgpr_private_segment_size", SImode, -1},
+#define WORKGROUP_ID_X_ARG 8
+  {"workgroup_id_X", ".amdhsa_system_sgpr_workgroup_id_x", SImode, -2},
+  {"workgroup_id_Y", ".amdhsa_system_sgpr_workgroup_id_y", SImode, -2},
+  {"workgroup_id_Z", ".amdhsa_system_sgpr_workgroup_id_z", SImode, -2},
+  {"workgroup_info", ".amdhsa_system_sgpr_workgroup_info", SImode, -1},
+#define PRIVATE_SEGMENT_WAVE_OFFSET_ARG 12
   {"private_segment_wave_offset",
-    "enable_sgpr_private_segment_wave_byte_offset", SImode, -2},
-#define WORK_ITEM_ID_X_ARG 16
+    ".amdhsa_system_sgpr_private_segment_wavefront_offset", SImode, -2},
+#define WORK_ITEM_ID_X_ARG 13
   {"work_item_id_X", NULL, V64SImode, FIRST_VGPR_REG},
-#define WORK_ITEM_ID_Y_ARG 17
+#define WORK_ITEM_ID_Y_ARG 14
   {"work_item_id_Y", NULL, V64SImode, FIRST_VGPR_REG + 1},
-#define WORK_ITEM_ID_Z_ARG 18
+#define WORK_ITEM_ID_Z_ARG 15
   {"work_item_id_Z", NULL, V64SImode, FIRST_VGPR_REG + 2}
 };
 
@@ -234,7 +252,7 @@ gcn_parse_amdgpu_hsa_kernel_attribute (struct gcn_kernel_args *args,
       const char *str;
       if (TREE_CODE (TREE_VALUE (list)) != STRING_CST)
 	{
-	  error ("amdgpu_hsa_kernel attribute requires string constant "
+	  error ("%<amdgpu_hsa_kernel%> attribute requires string constant "
 		 "arguments");
 	  break;
 	}
@@ -247,13 +265,14 @@ gcn_parse_amdgpu_hsa_kernel_attribute (struct gcn_kernel_args *args,
 	}
       if (a == GCN_KERNEL_ARG_TYPES)
 	{
-	  error ("unknown specifier %s in amdgpu_hsa_kernel attribute", str);
+	  error ("unknown specifier %qs in %<amdgpu_hsa_kernel%> attribute",
+		 str);
 	  err = true;
 	  break;
 	}
       if (args->requested & (1 << a))
 	{
-	  error ("duplicated parameter specifier %s in amdgpu_hsa_kernel "
+	  error ("duplicated parameter specifier %qs in %<amdgpu_hsa_kernel%> "
 		 "attribute", str);
 	  err = true;
 	  break;
@@ -355,6 +374,19 @@ static const struct attribute_spec gcn_attribute_table[] = {
 
 /* }}}  */
 /* {{{ Registers and modes.  */
+
+/* Implement TARGET_SCALAR_MODE_SUPPORTED_P.  */
+
+bool
+gcn_scalar_mode_supported_p (scalar_mode mode)
+{
+  return (mode == BImode
+	  || mode == QImode
+	  || mode == HImode /* || mode == HFmode  */
+	  || mode == SImode || mode == SFmode
+	  || mode == DImode || mode == DFmode
+	  || mode == TImode);
+}
 
 /* Implement TARGET_CLASS_MAX_NREGS.
  
@@ -468,7 +500,8 @@ gcn_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
     return (vgpr_1reg_mode_p (mode)
 	    || (!((regno - FIRST_VGPR_REG) & 1) && vgpr_2reg_mode_p (mode))
 	    /* TImode is used by DImode compare_and_swap.  */
-	    || mode == TImode);
+	    || (mode == TImode
+		&& !((regno - FIRST_VGPR_REG) & 3)));
   return false;
 }
 
@@ -1488,6 +1521,32 @@ gcn_addr_space_convert (rtx op, tree from_type, tree to_type)
     gcc_unreachable ();
 }
 
+/* Implement TARGET_ADDR_SPACE_DEBUG.
+
+   Return the dwarf address space class for each hardware address space.  */
+
+static int
+gcn_addr_space_debug (addr_space_t as)
+{
+  switch (as)
+    {
+      case ADDR_SPACE_DEFAULT:
+      case ADDR_SPACE_FLAT:
+      case ADDR_SPACE_SCALAR_FLAT:
+      case ADDR_SPACE_FLAT_SCRATCH:
+	return DW_ADDR_none;
+      case ADDR_SPACE_GLOBAL:
+	return 1;      // DW_ADDR_LLVM_global
+      case ADDR_SPACE_LDS:
+	return 3;      // DW_ADDR_LLVM_group
+      case ADDR_SPACE_SCRATCH:
+	return 4;      // DW_ADDR_LLVM_private
+      case ADDR_SPACE_GDS:
+	return 0x8000; // DW_ADDR_AMDGPU_region
+    }
+  gcc_unreachable ();
+}
+
 
 /* Implement REGNO_MODE_CODE_OK_FOR_BASE_P via gcn.h
    
@@ -2075,7 +2134,7 @@ gcn_conditional_register_usage (void)
   if (cfun->machine->normal_function)
     {
       /* Restrict the set of SGPRs and VGPRs used by non-kernel functions.  */
-      for (int i = SGPR_REGNO (MAX_NORMAL_SGPR_COUNT - 2);
+      for (int i = SGPR_REGNO (MAX_NORMAL_SGPR_COUNT);
 	   i <= LAST_SGPR_REG; i++)
 	fixed_regs[i] = 1, call_used_regs[i] = 1;
 
@@ -2094,7 +2153,7 @@ gcn_conditional_register_usage (void)
   /* Requesting a set of args different from the default violates the ABI.  */
   if (!leaf_function_p ())
     warning (0, "A non-default set of initial values has been requested, "
-		"which violates the ABI!");
+		"which violates the ABI");
 
   for (int i = SGPR_REGNO (0); i < SGPR_REGNO (14); i++)
     fixed_regs[i] = 0;
@@ -2129,10 +2188,6 @@ gcn_conditional_register_usage (void)
     fixed_regs[cfun->machine->args.reg[WORK_ITEM_ID_Y_ARG]] = 1;
   if (cfun->machine->args.reg[WORK_ITEM_ID_Z_ARG] >= 0)
     fixed_regs[cfun->machine->args.reg[WORK_ITEM_ID_Z_ARG]] = 1;
-
-  if (TARGET_GCN5_PLUS)
-    /* v0 is always zero, for global nul-offsets.  */
-    fixed_regs[VGPR_REGNO (0)] = 1;
 }
 
 /* Determine if a load or store is valid, according to the register classes
@@ -2295,6 +2350,10 @@ gcn_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
 	return 0;
 
       if (targetm.calls.must_pass_in_stack (arg))
+	return 0;
+
+      /* Vector parameters are not supported yet.  */
+      if (VECTOR_MODE_P (arg.mode))
 	return 0;
 
       int reg_num = FIRST_PARM_REG + cum->num;
@@ -2484,6 +2543,10 @@ gcn_return_in_memory (const_tree type, const_tree ARG_UNUSED (fntype))
   if (AGGREGATE_TYPE_P (type))
     return true;
 
+  /* Vector return values are not supported yet.  */
+  if (VECTOR_TYPE_P (type))
+    return true;
+
   if (mode == BLKmode)
     return true;
 
@@ -2574,9 +2637,11 @@ gcn_omp_device_kind_arch_isa (enum omp_device_kind_arch_isa trait,
       if (strcmp (name, "fiji") == 0)
 	return gcn_arch == PROCESSOR_FIJI;
       if (strcmp (name, "gfx900") == 0)
-	return gcn_arch == PROCESSOR_VEGA;
+	return gcn_arch == PROCESSOR_VEGA10;
       if (strcmp (name, "gfx906") == 0)
-	return gcn_arch == PROCESSOR_VEGA;
+	return gcn_arch == PROCESSOR_VEGA20;
+      if (strcmp (name, "gfx908") == 0)
+	return gcn_arch == PROCESSOR_GFX908;
       return 0;
     default:
       gcc_unreachable ();
@@ -2634,6 +2699,7 @@ move_callee_saved_registers (rtx sp, machine_function *offsets,
   rtx as = gen_rtx_CONST_INT (VOIDmode, STACK_ADDR_SPACE);
   HOST_WIDE_INT exec_set = 0;
   int offreg_set = 0;
+  auto_vec<int> saved_sgprs;
 
   start_sequence ();
 
@@ -2650,7 +2716,10 @@ move_callee_saved_registers (rtx sp, machine_function *offsets,
 	int lane = saved_scalars % 64;
 
 	if (prologue)
-	  emit_insn (gen_vec_setv64si (vreg, reg, GEN_INT (lane)));
+	  {
+	    emit_insn (gen_vec_setv64si (vreg, reg, GEN_INT (lane)));
+	    saved_sgprs.safe_push (regno);
+	  }
 	else
 	  emit_insn (gen_vec_extractv64sisi (reg, vreg, GEN_INT (lane)));
 
@@ -2683,7 +2752,7 @@ move_callee_saved_registers (rtx sp, machine_function *offsets,
 				  gcn_gen_undef (V64SImode), exec));
 
   /* Move vectors.  */
-  for (regno = FIRST_VGPR_REG, offset = offsets->pretend_size;
+  for (regno = FIRST_VGPR_REG, offset = 0;
        regno < FIRST_PSEUDO_REGISTER; regno++)
     if ((df_regs_ever_live_p (regno) && !call_used_or_fixed_reg_p (regno))
 	|| (regno == VGPR_REGNO (6) && saved_scalars > 0)
@@ -2704,8 +2773,67 @@ move_callee_saved_registers (rtx sp, machine_function *offsets,
 	  }
 
 	if (prologue)
-	  emit_insn (gen_scatterv64si_insn_1offset_exec (vsp, const0_rtx, reg,
-							 as, const0_rtx, exec));
+	  {
+	    rtx insn = emit_insn (gen_scatterv64si_insn_1offset_exec
+				  (vsp, const0_rtx, reg, as, const0_rtx,
+				   exec));
+
+	    /* Add CFI metadata.  */
+	    rtx note;
+	    if (regno == VGPR_REGNO (6) || regno == VGPR_REGNO (7))
+	      {
+		int start = (regno == VGPR_REGNO (7) ? 64 : 0);
+		int count = MIN (saved_scalars - start, 64);
+		int add_lr = (regno == VGPR_REGNO (6)
+			      && df_regs_ever_live_p (LINK_REGNUM));
+		int lrdest = -1;
+		rtvec seq = rtvec_alloc (count + add_lr);
+
+		/* Add an REG_FRAME_RELATED_EXPR entry for each scalar
+		   register that was saved in this batch.  */
+		for (int idx = 0; idx < count; idx++)
+		  {
+		    int stackaddr = offset + idx * 4;
+		    rtx dest = gen_rtx_MEM (SImode,
+					    gen_rtx_PLUS
+					    (DImode, sp,
+					     GEN_INT (stackaddr)));
+		    rtx src = gen_rtx_REG (SImode, saved_sgprs[start + idx]);
+		    rtx set = gen_rtx_SET (dest, src);
+		    RTX_FRAME_RELATED_P (set) = 1;
+		    RTVEC_ELT (seq, idx) = set;
+
+		    if (saved_sgprs[start + idx] == LINK_REGNUM)
+		      lrdest = stackaddr;
+		  }
+
+		/* Add an additional expression for DWARF_LINK_REGISTER if
+		   LINK_REGNUM was saved.  */
+		if (lrdest != -1)
+		  {
+		    rtx dest = gen_rtx_MEM (DImode,
+					    gen_rtx_PLUS
+					    (DImode, sp,
+					     GEN_INT (lrdest)));
+		    rtx src = gen_rtx_REG (DImode, DWARF_LINK_REGISTER);
+		    rtx set = gen_rtx_SET (dest, src);
+		    RTX_FRAME_RELATED_P (set) = 1;
+		    RTVEC_ELT (seq, count) = set;
+		  }
+
+		note = gen_rtx_SEQUENCE (VOIDmode, seq);
+	      }
+	    else
+	      {
+		rtx dest = gen_rtx_MEM (V64SImode,
+					gen_rtx_PLUS (DImode, sp,
+						      GEN_INT (offset)));
+		rtx src = gen_rtx_REG (V64SImode, regno);
+		note = gen_rtx_SET (dest, src);
+	      }
+	    RTX_FRAME_RELATED_P (insn) = 1;
+	    add_reg_note (insn, REG_FRAME_RELATED_EXPR, note);
+	  }
 	else
 	  emit_insn (gen_gatherv64si_insn_1offset_exec
 		     (reg, vsp, const0_rtx, as, const0_rtx,
@@ -2793,7 +2921,11 @@ gcn_expand_prologue ()
   if (!cfun || !cfun->machine || cfun->machine->normal_function)
     {
       rtx sp = gen_rtx_REG (Pmode, STACK_POINTER_REGNUM);
+      rtx sp_hi = gcn_operand_part (Pmode, sp, 1);
+      rtx sp_lo = gcn_operand_part (Pmode, sp, 0);
       rtx fp = gen_rtx_REG (Pmode, HARD_FRAME_POINTER_REGNUM);
+      rtx fp_hi = gcn_operand_part (Pmode, fp, 1);
+      rtx fp_lo = gcn_operand_part (Pmode, fp, 0);
 
       start_sequence ();
 
@@ -2810,23 +2942,52 @@ gcn_expand_prologue ()
 	+ offsets->callee_saves
 	+ offsets->local_vars + offsets->outgoing_args_size;
       if (sp_adjust > 0)
-	emit_insn (gen_adddi3_scc (sp, sp, gen_int_mode (sp_adjust, DImode)));
+	{
+	  /* Adding RTX_FRAME_RELATED_P effectively disables spliting, so
+	     we use split add explictly, and specify the DImode add in
+	     the note.  */
+	  rtx scc = gen_rtx_REG (BImode, SCC_REG);
+	  rtx adjustment = gen_int_mode (sp_adjust, SImode);
+	  rtx insn = emit_insn (gen_addsi3_scalar_carry (sp_lo, sp_lo,
+							 adjustment, scc));
+	  if (!offsets->need_frame_pointer)
+	    {
+	      RTX_FRAME_RELATED_P (insn) = 1;
+	      add_reg_note (insn, REG_FRAME_RELATED_EXPR,
+			    gen_rtx_SET (sp,
+					 gen_rtx_PLUS (DImode, sp,
+						       adjustment)));
+	    }
+	  emit_insn (gen_addcsi3_scalar_zero (sp_hi, sp_hi, scc));
+	}
 
       if (offsets->need_frame_pointer)
-	emit_insn (gen_adddi3_scc (fp, sp,
-				   gen_int_mode
-				   (-(offsets->local_vars +
-				      offsets->outgoing_args_size),
-				    DImode)));
+	{
+	  /* Adding RTX_FRAME_RELATED_P effectively disables spliting, so
+	     we use split add explictly, and specify the DImode add in
+	     the note.  */
+	  rtx scc = gen_rtx_REG (BImode, SCC_REG);
+	  int fp_adjust = -(offsets->local_vars + offsets->outgoing_args_size);
+	  rtx adjustment = gen_int_mode (fp_adjust, SImode);
+	  rtx insn = emit_insn (gen_addsi3_scalar_carry(fp_lo, sp_lo,
+							adjustment, scc));
+	  emit_insn (gen_addcsi3_scalar (fp_hi, sp_hi,
+					 (fp_adjust < 0 ? GEN_INT (-1)
+					  : const0_rtx),
+					 scc, scc));
+
+	  /* Set the CFA to the entry stack address, as an offset from the
+	     frame pointer.  This is preferred because the frame pointer is
+	     saved in each frame, whereas the stack pointer is not.  */
+	  RTX_FRAME_RELATED_P (insn) = 1;
+	  add_reg_note (insn, REG_CFA_DEF_CFA,
+			gen_rtx_PLUS (DImode, fp,
+				      GEN_INT (-(offsets->pretend_size
+						 + offsets->callee_saves))));
+	}
 
       rtx_insn *seq = get_insns ();
       end_sequence ();
-
-      /* FIXME: Prologue insns should have this flag set for debug output, etc.
-	 but it causes issues for now.
-      for (insn = seq; insn; insn = NEXT_INSN (insn))
-        if (INSN_P (insn))
-	  RTX_FRAME_RELATED_P (insn) = 1;*/
 
       emit_insn (seq);
     }
@@ -2863,6 +3024,8 @@ gcn_expand_prologue ()
 
       /* Set up frame pointer and stack pointer.  */
       rtx sp = gen_rtx_REG (DImode, STACK_POINTER_REGNUM);
+      rtx sp_hi = simplify_gen_subreg (SImode, sp, DImode, 4);
+      rtx sp_lo = simplify_gen_subreg (SImode, sp, DImode, 0);
       rtx fp = gen_rtx_REG (DImode, HARD_FRAME_POINTER_REGNUM);
       rtx fp_hi = simplify_gen_subreg (SImode, fp, DImode, 4);
       rtx fp_lo = simplify_gen_subreg (SImode, fp, DImode, 0);
@@ -2878,10 +3041,38 @@ gcn_expand_prologue ()
       emit_insn (gen_addsi3_scalar_carry (fp_lo, fp_lo, wave_offset, scc));
       emit_insn (gen_addcsi3_scalar_zero (fp_hi, fp_hi, scc));
 
+      /* Adding RTX_FRAME_RELATED_P effectively disables spliting, so we use
+	 split add explictly, and specify the DImode add in the note.
+         The DWARF info expects that the callee-save data is in the frame,
+         even though it isn't (because this is the entry point), so we
+         make a notional adjustment to the DWARF frame offset here.  */
+      rtx dbg_adjustment = gen_int_mode (sp_adjust + offsets->callee_saves,
+					 DImode);
+      rtx insn;
       if (sp_adjust > 0)
-	emit_insn (gen_adddi3_scc (sp, fp, gen_int_mode (sp_adjust, DImode)));
+	{
+	  rtx scc = gen_rtx_REG (BImode, SCC_REG);
+	  rtx adjustment = gen_int_mode (sp_adjust, DImode);
+	  insn = emit_insn (gen_addsi3_scalar_carry(sp_lo, fp_lo, adjustment,
+						    scc));
+	  emit_insn (gen_addcsi3_scalar_zero (sp_hi, fp_hi, scc));
+	}
       else
-	emit_move_insn (sp, fp);
+	insn = emit_move_insn (sp, fp);
+      RTX_FRAME_RELATED_P (insn) = 1;
+      add_reg_note (insn, REG_FRAME_RELATED_EXPR,
+		    gen_rtx_SET (sp, gen_rtx_PLUS (DImode, sp,
+						   dbg_adjustment)));
+
+      if (offsets->need_frame_pointer)
+	{
+	  /* Set the CFA to the entry stack address, as an offset from the
+	     frame pointer.  This is necessary when alloca is used, and
+	     harmless otherwise.  */
+	  rtx neg_adjust = gen_int_mode (-offsets->callee_saves, DImode);
+	  add_reg_note (insn, REG_CFA_DEF_CFA,
+			gen_rtx_PLUS (DImode, fp, neg_adjust));
+	}
 
       /* Make sure the flat scratch reg doesn't get optimised away.  */
       emit_insn (gen_prologue_use (gen_rtx_REG (DImode, FLAT_SCRATCH_REG)));
@@ -2894,7 +3085,7 @@ gcn_expand_prologue ()
      The low-part is the address of the topmost addressable byte, which is
      size-1.  The high-part is an offset and should be zero.  */
   emit_move_insn (gen_rtx_REG (SImode, M0_REG),
-		  gen_int_mode (LDS_SIZE-1, SImode));
+		  gen_int_mode (LDS_SIZE, SImode));
 
   emit_insn (gen_prologue_use (gen_rtx_REG (SImode, M0_REG)));
 
@@ -2984,6 +3175,23 @@ gcn_expand_epilogue (void)
     }
 
   emit_jump_insn (gen_gcn_return ());
+}
+
+/* Implement TARGET_FRAME_POINTER_REQUIRED.
+
+   Return true if the frame pointer should not be eliminated.  */
+
+bool
+gcn_frame_pointer_rqd (void)
+{
+  /* GDB needs the frame pointer in order to unwind properly,
+     but that's not important for the entry point, unless alloca is used.
+     It's not important for code execution, so we should repect the
+     -fomit-frame-pointer flag.  */
+  return (!flag_omit_frame_pointer
+	  && cfun
+	  && (cfun->calls_alloca
+	      || (cfun->machine && cfun->machine->normal_function)));
 }
 
 /* Implement TARGET_CAN_ELIMINATE.
@@ -3159,8 +3367,7 @@ gcn_cannot_copy_insn_p (rtx_insn *insn)
 static enum unwind_info_type
 gcn_debug_unwind_info ()
 {
-  /* No support for debug info, yet.  */
-  return UI_NONE;
+  return UI_DWARF2;
 }
 
 /* Determine if there is a suitable hardware conversion instruction.
@@ -3524,8 +3731,6 @@ gcn_init_builtins (void)
       TREE_NOTHROW (gcn_builtin_decls[i]) = 1;
     }
 
-/* FIXME: remove the ifdef once OpenACC support is merged upstream.  */
-#ifdef BUILT_IN_GOACC_SINGLE_START
   /* These builtins need to take/return an LDS pointer: override the generic
      versions here.  */
 
@@ -3542,7 +3747,34 @@ gcn_init_builtins (void)
 
   set_builtin_decl (BUILT_IN_GOACC_BARRIER,
 		    gcn_builtin_decls[GCN_BUILTIN_ACC_BARRIER], false);
-#endif
+}
+
+/* Implement TARGET_INIT_LIBFUNCS.  */
+
+static void
+gcn_init_libfuncs (void)
+{
+  /* BITS_PER_UNIT * 2 is 64 bits, which causes
+     optabs-libfuncs.c:gen_int_libfunc to omit TImode (i.e 128 bits)
+     libcalls that we need to support operations for that type.  Initialise
+     them here instead.  */
+  set_optab_libfunc (udiv_optab, TImode, "__udivti3");
+  set_optab_libfunc (umod_optab, TImode, "__umodti3");
+  set_optab_libfunc (sdiv_optab, TImode, "__divti3");
+  set_optab_libfunc (smod_optab, TImode, "__modti3");
+  set_optab_libfunc (smul_optab, TImode, "__multi3");
+  set_optab_libfunc (addv_optab, TImode, "__addvti3");
+  set_optab_libfunc (subv_optab, TImode, "__subvti3");
+  set_optab_libfunc (negv_optab, TImode, "__negvti2");
+  set_optab_libfunc (absv_optab, TImode, "__absvti2");
+  set_optab_libfunc (smulv_optab, TImode, "__mulvti3");
+  set_optab_libfunc (ffs_optab, TImode, "__ffsti2");
+  set_optab_libfunc (clz_optab, TImode, "__clzti2");
+  set_optab_libfunc (ctz_optab, TImode, "__ctzti2");
+  set_optab_libfunc (clrsb_optab, TImode, "__clrsbti2");
+  set_optab_libfunc (popcount_optab, TImode, "__popcountti2");
+  set_optab_libfunc (parity_optab, TImode, "__parityti2");
+  set_optab_libfunc (bswap_optab, TImode, "__bswapti2");
 }
 
 /* Expand the CMP_SWAP GCN builtins.  We have our own versions that do
@@ -3919,14 +4151,17 @@ gcn_vectorize_vec_perm_const (machine_mode vmode, rtx dst,
   unsigned int perm[64];
   for (unsigned int i = 0; i < nelt; ++i)
     perm[i] = sel[i] & (2 * nelt - 1);
+  for (unsigned int i = nelt; i < 64; ++i)
+    perm[i] = 0;
+
+  src0 = force_reg (vmode, src0);
+  src1 = force_reg (vmode, src1);
 
   /* Make life a bit easier by swapping operands if necessary so that
      the first element always comes from src0.  */
   if (perm[0] >= nelt)
     {
-      rtx temp = src0;
-      src0 = src1;
-      src1 = temp;
+      std::swap (src0, src1);
 
       for (unsigned int i = 0; i < nelt; ++i)
 	if (perm[i] < nelt)
@@ -4044,8 +4279,8 @@ gcn_vectorize_preferred_simd_mode (scalar_mode mode)
    In particular, we do *not* want to match vector bit-size.  */
 
 static opt_machine_mode
-gcn_related_vector_mode (machine_mode vector_mode, scalar_mode element_mode,
-			 poly_uint64 nunits)
+gcn_related_vector_mode (machine_mode ARG_UNUSED (vector_mode),
+			 scalar_mode element_mode, poly_uint64 nunits)
 {
   if (known_ne (nunits, 0U) && known_ne (nunits, 64U))
     return VOIDmode;
@@ -4188,7 +4423,8 @@ gcn_expand_reduc_scalar (machine_mode mode, rtx src, int unspec)
 		      || unspec == UNSPEC_SMAX_DPP_SHR
 		      || unspec == UNSPEC_UMIN_DPP_SHR
 		      || unspec == UNSPEC_UMAX_DPP_SHR)
-		     && mode == V64DImode)
+		     && (mode == V64DImode
+			 || mode == V64DFmode))
 		    || (unspec == UNSPEC_PLUS_DPP_SHR
 			&& mode == V64DFmode));
   rtx_code code = (unspec == UNSPEC_SMIN_DPP_SHR ? SMIN
@@ -4435,6 +4671,8 @@ gcn_md_reorg (void)
       df_insn_rescan_all ();
     }
 
+  df_live_add_problem ();
+  df_live_set_all_dirty ();
   df_analyze ();
 
   /* This pass ensures that the EXEC register is set correctly, according
@@ -4455,6 +4693,17 @@ gcn_md_reorg (void)
       bool curr_exec_known = true;
       int64_t curr_exec = 0;	/* 0 here means 'the value is that of EXEC
 				   after last_exec_def is executed'.  */
+
+      bitmap live_in = DF_LR_IN (bb);
+      bool exec_live_on_entry = false;
+      if (bitmap_bit_p (live_in, EXEC_LO_REG)
+	  || bitmap_bit_p (live_in, EXEC_HI_REG))
+	{
+	  if (dump_file)
+	    fprintf (dump_file, "EXEC reg is live on entry to block %d\n",
+		     (int) bb->index);
+	  exec_live_on_entry = true;
+	}
 
       FOR_BB_INSNS_SAFE (bb, insn, curr)
 	{
@@ -4594,6 +4843,8 @@ gcn_md_reorg (void)
 			 exec_lo_def_p == exec_hi_def_p ? "full" : "partial",
 			 INSN_UID (insn));
 	    }
+
+	  exec_live_on_entry = false;
 	}
 
       COPY_REG_SET (&live, DF_LR_OUT (bb));
@@ -4603,7 +4854,7 @@ gcn_md_reorg (void)
 	 at the end of the block.  */
       if ((REGNO_REG_SET_P (&live, EXEC_LO_REG)
 	   || REGNO_REG_SET_P (&live, EXEC_HI_REG))
-	  && (!curr_exec_known || !curr_exec_explicit))
+	  && (!curr_exec_known || !curr_exec_explicit || exec_live_on_entry))
 	{
 	  rtx_insn *end_insn = BB_END (bb);
 
@@ -4784,11 +5035,7 @@ gcn_goacc_validate_dims (tree decl, int dims[], int fn_level,
 			 unsigned /*used*/)
 {
   bool changed = false;
-
-  /* FIXME: remove -facc-experimental-workers when they're ready.  */
-  int max_workers = flag_worker_partitioning ? 16 : 1;
-
-  gcc_assert (!flag_worker_partitioning);
+  const int max_workers = 16;
 
   /* The vector size must appear to be 64, to the user, unless this is a
      SEQ routine.  The real, internal value is always 1, which means use
@@ -4801,8 +5048,8 @@ gcn_goacc_validate_dims (tree decl, int dims[], int fn_level,
 	warning_at (decl ? DECL_SOURCE_LOCATION (decl) : UNKNOWN_LOCATION,
 		    OPT_Wopenacc_dims,
 		    (dims[GOMP_DIM_VECTOR]
-		     ? G_("using vector_length (64), ignoring %d")
-		     : G_("using vector_length (64), "
+		     ? G_("using %<vector_length (64)%>, ignoring %d")
+		     : G_("using %<vector_length (64)%>, "
 			  "ignoring runtime setting")),
 		    dims[GOMP_DIM_VECTOR]);
       dims[GOMP_DIM_VECTOR] = 1;
@@ -4814,7 +5061,7 @@ gcn_goacc_validate_dims (tree decl, int dims[], int fn_level,
     {
       warning_at (decl ? DECL_SOURCE_LOCATION (decl) : UNKNOWN_LOCATION,
 		  OPT_Wopenacc_dims,
-		  "using num_workers (%d), ignoring %d",
+		  "using %<num_workers (%d)%>, ignoring %d",
 		  max_workers, dims[GOMP_DIM_WORKER]);
       dims[GOMP_DIM_WORKER] = max_workers;
       changed = true;
@@ -4825,8 +5072,7 @@ gcn_goacc_validate_dims (tree decl, int dims[], int fn_level,
     {
       dims[GOMP_DIM_VECTOR] = GCN_DEFAULT_VECTORS;
       if (dims[GOMP_DIM_WORKER] < 0)
-	dims[GOMP_DIM_WORKER] = (flag_worker_partitioning
-				 ? GCN_DEFAULT_WORKERS : 1);
+	dims[GOMP_DIM_WORKER] = GCN_DEFAULT_WORKERS;
       if (dims[GOMP_DIM_GANG] < 0)
 	dims[GOMP_DIM_GANG] = GCN_DEFAULT_GANGS;
       changed = true;
@@ -4888,11 +5134,14 @@ gcn_oacc_dim_pos (int dim)
 /* Implement TARGET_GOACC_FORK_JOIN.  */
 
 static bool
-gcn_fork_join (gcall *ARG_UNUSED (call), const int *ARG_UNUSED (dims),
-	       bool ARG_UNUSED (is_fork))
+gcn_fork_join (gcall *call, const int dims[], bool is_fork)
 {
-  /* GCN does not use the fork/join concept invented for NVPTX.
-     Instead we use standard autovectorization.  */
+  tree arg = gimple_call_arg (call, 2);
+  unsigned axis = TREE_INT_CST_LOW (arg);
+
+  if (!is_fork && axis == GOMP_DIM_WORKER && dims[axis] != 1)
+    return true;
+
   return false;
 }
 
@@ -4909,28 +5158,52 @@ gcn_fixup_accel_lto_options (tree fndecl)
   if (!func_optimize)
     return;
 
-  tree old_optimize = build_optimization_node (&global_options);
+  tree old_optimize
+    = build_optimization_node (&global_options, &global_options_set);
   tree new_optimize;
 
   /* If the function changed the optimization levels as well as
      setting target options, start with the optimizations
      specified.  */
   if (func_optimize != old_optimize)
-    cl_optimization_restore (&global_options,
+    cl_optimization_restore (&global_options, &global_options_set,
 			     TREE_OPTIMIZATION (func_optimize));
 
   gcn_option_override ();
 
   /* The target attributes may also change some optimization flags,
      so update the optimization options if necessary.  */
-  new_optimize = build_optimization_node (&global_options);
+  new_optimize = build_optimization_node (&global_options,
+					  &global_options_set);
 
   if (old_optimize != new_optimize)
     {
       DECL_FUNCTION_SPECIFIC_OPTIMIZATION (fndecl) = new_optimize;
-      cl_optimization_restore (&global_options,
+      cl_optimization_restore (&global_options, &global_options_set,
 			       TREE_OPTIMIZATION (old_optimize));
     }
+}
+
+/* Implement TARGET_GOACC_SHARED_MEM_LAYOUT hook.  */
+
+static void
+gcn_shared_mem_layout (unsigned HOST_WIDE_INT *lo,
+		       unsigned HOST_WIDE_INT *hi,
+		       int ARG_UNUSED (dims[GOMP_DIM_MAX]),
+		       unsigned HOST_WIDE_INT
+			 ARG_UNUSED (private_size[GOMP_DIM_MAX]),
+		       unsigned HOST_WIDE_INT reduction_size[GOMP_DIM_MAX])
+{
+  *lo = gang_private_size_opt + reduction_size[GOMP_DIM_WORKER];
+  /* !!! We can maybe use dims[] to estimate the maximum number of work
+     groups/wavefronts/etc. we will launch, and therefore tune the maximum
+     amount of LDS we should use.  For now, use a minimal amount to try to
+     maximise occupancy.  */
+  *hi = acc_lds_size;
+  machine_function *machfun = cfun->machine;
+  machfun->reduction_base = gang_private_size_opt;
+  machfun->reduction_limit
+    = gang_private_size_opt + reduction_size[GOMP_DIM_WORKER];
 }
 
 /* }}}  */
@@ -4943,11 +5216,43 @@ gcn_fixup_accel_lto_options (tree fndecl)
 static void
 output_file_start (void)
 {
-  fprintf (asm_out_file, "\t.text\n");
-  fprintf (asm_out_file, "\t.hsa_code_object_version 2,0\n");
-  fprintf (asm_out_file, "\t.hsa_code_object_isa\n");	/* Autodetect.  */
-  fprintf (asm_out_file, "\t.section\t.AMDGPU.config\n");
-  fprintf (asm_out_file, "\t.text\n");
+  const char *cpu;
+  bool use_sram = flag_sram_ecc;
+  switch (gcn_arch)
+    {
+    case PROCESSOR_FIJI:
+      cpu = "gfx803";
+#ifndef HAVE_GCN_SRAM_ECC_FIJI
+      use_sram = false;
+#endif
+      break;
+    case PROCESSOR_VEGA10:
+      cpu = "gfx900";
+#ifndef HAVE_GCN_SRAM_ECC_GFX900
+      use_sram = false;
+#endif
+      break;
+    case PROCESSOR_VEGA20:
+      cpu = "gfx906";
+#ifndef HAVE_GCN_SRAM_ECC_GFX906
+      use_sram = false;
+#endif
+      break;
+    case PROCESSOR_GFX908:
+      cpu = "gfx908";
+#ifndef HAVE_GCN_SRAM_ECC_GFX908
+      use_sram = false;
+#endif
+      break;
+    default: gcc_unreachable ();
+    }
+
+  const char *xnack = (flag_xnack ? "+xnack" : "");
+  /* FIXME: support "any" when we move to HSACOv4.  */
+  const char *sram_ecc = (use_sram ? "+sram-ecc" : "");
+
+  fprintf(asm_out_file, "\t.amdgcn_target \"amdgcn-unknown-amdhsa--%s%s%s\"\n",
+	  cpu, xnack, sram_ecc);
 }
 
 /* Implement ASM_DECLARE_FUNCTION_NAME via gcn-hsa.h.
@@ -4963,7 +5268,8 @@ gcn_hsa_declare_function_name (FILE *file, const char *name, tree)
 {
   int sgpr, vgpr;
   bool xnack_enabled = false;
-  int extra_regs = 0;
+
+  fputs ("\n\n", file);
 
   if (cfun && cfun->machine && cfun->machine->normal_function)
     {
@@ -4986,76 +5292,20 @@ gcn_hsa_declare_function_name (FILE *file, const char *name, tree)
       break;
   vgpr++;
 
-  if (xnack_enabled)
-    extra_regs = 6;
-  if (df_regs_ever_live_p (FLAT_SCRATCH_LO_REG)
-      || df_regs_ever_live_p (FLAT_SCRATCH_HI_REG))
-    extra_regs = 4;
-  else if (df_regs_ever_live_p (VCC_LO_REG)
-	   || df_regs_ever_live_p (VCC_HI_REG))
-    extra_regs = 2;
-
   if (!leaf_function_p ())
     {
       /* We can't know how many registers function calls might use.  */
       if (vgpr < MAX_NORMAL_VGPR_COUNT)
 	vgpr = MAX_NORMAL_VGPR_COUNT;
-      if (sgpr + extra_regs < MAX_NORMAL_SGPR_COUNT)
-	sgpr = MAX_NORMAL_SGPR_COUNT - extra_regs;
+      if (sgpr < MAX_NORMAL_SGPR_COUNT)
+	sgpr = MAX_NORMAL_SGPR_COUNT;
     }
 
-  /* GFX8 allocates SGPRs in blocks of 8.
-     GFX9 uses blocks of 16.  */
-  int granulated_sgprs;
-  if (TARGET_GCN3)
-    granulated_sgprs = (sgpr + extra_regs + 7) / 8 - 1;
-  else if (TARGET_GCN5)
-    granulated_sgprs = 2 * ((sgpr + extra_regs + 15) / 16 - 1);
-  else
-    gcc_unreachable ();
-
-  fputs ("\t.align\t256\n", file);
-  fputs ("\t.type\t", file);
-  assemble_name (file, name);
-  fputs (",@function\n\t.amdgpu_hsa_kernel\t", file);
+  fputs ("\t.rodata\n"
+	 "\t.p2align\t6\n"
+	 "\t.amdhsa_kernel\t", file);
   assemble_name (file, name);
   fputs ("\n", file);
-  assemble_name (file, name);
-  fputs (":\n", file);
-  fprintf (file, "\t.amd_kernel_code_t\n"
-	   "\t\tkernel_code_version_major = 1\n"
-	   "\t\tkernel_code_version_minor = 0\n" "\t\tmachine_kind = 1\n"
-	   /* "\t\tmachine_version_major = 8\n"
-	      "\t\tmachine_version_minor = 0\n"
-	      "\t\tmachine_version_stepping = 1\n" */
-	   "\t\tkernel_code_entry_byte_offset = 256\n"
-	   "\t\tkernel_code_prefetch_byte_size = 0\n"
-	   "\t\tmax_scratch_backing_memory_byte_size = 0\n"
-	   "\t\tcompute_pgm_rsrc1_vgprs = %i\n"
-	   "\t\tcompute_pgm_rsrc1_sgprs = %i\n"
-	   "\t\tcompute_pgm_rsrc1_priority = 0\n"
-	   "\t\tcompute_pgm_rsrc1_float_mode = 192\n"
-	   "\t\tcompute_pgm_rsrc1_priv = 0\n"
-	   "\t\tcompute_pgm_rsrc1_dx10_clamp = 1\n"
-	   "\t\tcompute_pgm_rsrc1_debug_mode = 0\n"
-	   "\t\tcompute_pgm_rsrc1_ieee_mode = 1\n"
-	   /* We enable scratch memory.  */
-	   "\t\tcompute_pgm_rsrc2_scratch_en = 1\n"
-	   "\t\tcompute_pgm_rsrc2_user_sgpr = %i\n"
-	   "\t\tcompute_pgm_rsrc2_tgid_x_en = 1\n"
-	   "\t\tcompute_pgm_rsrc2_tgid_y_en = 0\n"
-	   "\t\tcompute_pgm_rsrc2_tgid_z_en = 0\n"
-	   "\t\tcompute_pgm_rsrc2_tg_size_en = 0\n"
-	   "\t\tcompute_pgm_rsrc2_tidig_comp_cnt = 0\n"
-	   "\t\tcompute_pgm_rsrc2_excp_en_msb = 0\n"
-	   "\t\tcompute_pgm_rsrc2_lds_size = 0\n"	/* Set at runtime.  */
-	   "\t\tcompute_pgm_rsrc2_excp_en = 0\n",
-	   (vgpr - 1) / 4,
-	   /* Must match wavefront_sgpr_count */
-	   granulated_sgprs,
-	   /* The total number of SGPR user data registers requested.  This
-	      number must match the number of user data registers enabled.  */
-	   cfun->machine->args.nsgprs);
   int reg = FIRST_SGPR_REG;
   for (int a = 0; a < GCN_KERNEL_ARG_TYPES; a++)
     {
@@ -5073,7 +5323,8 @@ gcn_hsa_declare_function_name (FILE *file, const char *name, tree)
 
       if (gcn_kernel_arg_types[a].header_pseudo)
 	{
-	  fprintf (file, "\t\t%s = %i",
+	  fprintf (file, "\t  %s%s\t%i",
+		   (cfun->machine->args.requested & (1 << a)) != 0 ? "" : ";",
 		   gcn_kernel_arg_types[a].header_pseudo,
 		   (cfun->machine->args.requested & (1 << a)) != 0);
 	  if (reg_first != -1)
@@ -5091,54 +5342,71 @@ gcn_hsa_declare_function_name (FILE *file, const char *name, tree)
 	}
       else if (gcn_kernel_arg_types[a].fixed_regno >= 0
 	       && cfun->machine->args.requested & (1 << a))
-	fprintf (file, "\t\t; %s = %i (%s)\n",
+	fprintf (file, "\t  ; %s\t%i (%s)\n",
 		 gcn_kernel_arg_types[a].name,
 		 (cfun->machine->args.requested & (1 << a)) != 0,
 		 reg_names[gcn_kernel_arg_types[a].fixed_regno]);
     }
-  fprintf (file, "\t\tenable_vgpr_workitem_id = %i\n",
+  fprintf (file, "\t  .amdhsa_system_vgpr_workitem_id\t%i\n",
 	   (cfun->machine->args.requested & (1 << WORK_ITEM_ID_Z_ARG))
 	   ? 2
 	   : cfun->machine->args.requested & (1 << WORK_ITEM_ID_Y_ARG)
 	   ? 1 : 0);
-  fprintf (file, "\t\tenable_ordered_append_gds = 0\n"
-	   "\t\tprivate_element_size = 1\n"
-	   "\t\tis_ptr64 = 1\n"
-	   "\t\tis_dynamic_callstack = 0\n"
-	   "\t\tis_debug_enabled = 0\n"
-	   "\t\tis_xnack_enabled = %i\n"
-	   "\t\tworkitem_private_segment_byte_size = %i\n"
-	   "\t\tworkgroup_group_segment_byte_size = %u\n"
-	   "\t\tgds_segment_byte_size = 0\n"
-	   "\t\tkernarg_segment_byte_size = %i\n"
-	   "\t\tworkgroup_fbarrier_count = 0\n"
-	   "\t\twavefront_sgpr_count = %i\n"
-	   "\t\tworkitem_vgpr_count = %i\n"
-	   "\t\treserved_vgpr_first = 0\n"
-	   "\t\treserved_vgpr_count = 0\n"
-	   "\t\treserved_sgpr_first = 0\n"
-	   "\t\treserved_sgpr_count = 0\n"
-	   "\t\tdebug_wavefront_private_segment_offset_sgpr = 0\n"
-	   "\t\tdebug_private_segment_buffer_sgpr = 0\n"
-	   "\t\tkernarg_segment_alignment = %i\n"
-	   "\t\tgroup_segment_alignment = 4\n"
-	   "\t\tprivate_segment_alignment = %i\n"
-	   "\t\twavefront_size = 6\n"
-	   "\t\tcall_convention = 0\n"
-	   "\t\truntime_loader_kernel_symbol = 0\n"
-	   "\t.end_amd_kernel_code_t\n", xnack_enabled,
+  fprintf (file,
+	   "\t  .amdhsa_next_free_vgpr\t%i\n"
+	   "\t  .amdhsa_next_free_sgpr\t%i\n"
+	   "\t  .amdhsa_reserve_vcc\t1\n"
+	   "\t  .amdhsa_reserve_flat_scratch\t0\n"
+	   "\t  .amdhsa_reserve_xnack_mask\t%i\n"
+	   "\t  .amdhsa_private_segment_fixed_size\t%i\n"
+	   "\t  .amdhsa_group_segment_fixed_size\t%u\n"
+	   "\t  .amdhsa_float_denorm_mode_32\t3\n"
+	   "\t  .amdhsa_float_denorm_mode_16_64\t3\n",
+	   vgpr,
+	   sgpr,
+	   xnack_enabled,
 	   /* workitem_private_segment_bytes_size needs to be
 	      one 64th the wave-front stack size.  */
 	   stack_size_opt / 64,
-	   LDS_SIZE, cfun->machine->kernarg_segment_byte_size,
-	   /* Number of scalar registers used by a wavefront.  This
-	      includes the special SGPRs for VCC, Flat Scratch (Base,
-	      Size) and XNACK (for GFX8 (VI)+).  It does not include the
-	      16 SGPR added if a trap handler is enabled.  Must match
-	      compute_pgm_rsrc1.sgprs.  */
-	   sgpr + extra_regs, vgpr,
+	   LDS_SIZE);
+  fputs ("\t.end_amdhsa_kernel\n", file);
+
+#if 1
+  /* The following is YAML embedded in assembler; tabs are not allowed.  */
+  fputs ("        .amdgpu_metadata\n"
+	 "        amdhsa.version:\n"
+	 "          - 1\n"
+	 "          - 0\n"
+	 "        amdhsa.kernels:\n"
+	 "          - .name: ", file);
+  assemble_name (file, name);
+  fputs ("\n            .symbol: ", file);
+  assemble_name (file, name);
+  fprintf (file,
+	   ".kd\n"
+	   "            .kernarg_segment_size: %i\n"
+	   "            .kernarg_segment_align: %i\n"
+	   "            .group_segment_fixed_size: %u\n"
+	   "            .private_segment_fixed_size: %i\n"
+	   "            .wavefront_size: 64\n"
+	   "            .sgpr_count: %i\n"
+	   "            .vgpr_count: %i\n"
+	   "            .max_flat_workgroup_size: 1024\n",
+	   cfun->machine->kernarg_segment_byte_size,
 	   cfun->machine->kernarg_segment_alignment,
-	   crtl->stack_alignment_needed / 8);
+	   LDS_SIZE,
+	   stack_size_opt / 64,
+	   sgpr, vgpr);
+  fputs ("        .end_amdgpu_metadata\n", file);
+#endif
+
+  fputs ("\t.text\n", file);
+  fputs ("\t.align\t256\n", file);
+  fputs ("\t.type\t", file);
+  assemble_name (file, name);
+  fputs (",@function\n", file);
+  assemble_name (file, name);
+  fputs (":\n", file);
 
   /* This comment is read by mkoffload.  */
   if (flag_openacc)
@@ -5200,11 +5468,6 @@ gcn_target_asm_function_prologue (FILE *file)
       asm_fprintf (file, "\t; local vars size: %wd\n", offsets->local_vars);
       asm_fprintf (file, "\t; outgoing args size: %wd\n",
 		   offsets->outgoing_args_size);
-
-      /* Enable denorms.  */
-      asm_fprintf (file, "\n\t; Set MODE[FP_DENORM]: allow single and double"
-		   " input and output denorms\n");
-      asm_fprintf (file, "\ts_setreg_imm32_b32\thwreg(1, 4, 4), 0xf\n\n");
     }
 }
 
@@ -5270,17 +5533,18 @@ gcn_section_type_flags (tree decl, const char *name, int reloc)
 
 /* Helper function for gcn_asm_output_symbol_ref.
 
-   FIXME: If we want to have propagation blocks allocated separately and
-   statically like this, it would be better done via symbol refs and the
-   assembler/linker.  This is a temporary hack.  */
+   FIXME: This function is used to lay out gang-private variables in LDS
+   on a per-CU basis.
+   There may be cases in which gang-private variables in different compilation
+   units could clobber each other.  In that case we should be relying on the
+   linker to lay out gang-private LDS space, but that doesn't appear to be
+   possible at present.  */
 
 static void
 gcn_print_lds_decl (FILE *f, tree var)
 {
   int *offset;
-  machine_function *machfun = cfun->machine;
-
-  if ((offset = machfun->lds_allocs->get (var)))
+  if ((offset = lds_allocs.get (var)))
     fprintf (f, "%u", (unsigned) *offset);
   else
     {
@@ -5290,14 +5554,14 @@ gcn_print_lds_decl (FILE *f, tree var)
       if (size > align && size > 4 && align < 8)
 	align = 8;
 
-      machfun->lds_allocated = ((machfun->lds_allocated + align - 1)
-				& ~(align - 1));
+      gang_private_hwm = ((gang_private_hwm + align - 1) & ~(align - 1));
 
-      machfun->lds_allocs->put (var, machfun->lds_allocated);
-      fprintf (f, "%u", machfun->lds_allocated);
-      machfun->lds_allocated += size;
-      if (machfun->lds_allocated > LDS_SIZE)
-	error ("local data-share memory exhausted");
+      lds_allocs.put (var, gang_private_hwm);
+      fprintf (f, "%u", gang_private_hwm);
+      gang_private_hwm += size;
+      if (gang_private_hwm > gang_private_size_opt)
+	error ("gang-private data-share memory exhausted (increase with "
+	       "%<-mgang-private-size=<number>%>)");
     }
 }
 
@@ -5431,13 +5695,22 @@ print_operand_address (FILE *file, rtx mem)
 	      if (vgpr_offset == NULL_RTX)
 		/* In this case, the vector offset is zero, so we use the first
 		   lane of v1, which is initialized to zero.  */
-		fprintf (file, "v[1:2]");
+		{
+		  if (HAVE_GCN_ASM_GLOBAL_LOAD_FIXED)
+		    fprintf (file, "v1");
+		  else
+		    fprintf (file, "v[1:2]");
+		}
 	      else if (REG_P (vgpr_offset)
 		       && VGPR_REGNO_P (REGNO (vgpr_offset)))
 		{
-		  fprintf (file, "v[%d:%d]",
-			   REGNO (vgpr_offset) - FIRST_VGPR_REG,
-			   REGNO (vgpr_offset) - FIRST_VGPR_REG + 1);
+		  if (HAVE_GCN_ASM_GLOBAL_LOAD_FIXED)
+		    fprintf (file, "v%d",
+			     REGNO (vgpr_offset) - FIRST_VGPR_REG);
+		  else
+		    fprintf (file, "v[%d:%d]",
+			     REGNO (vgpr_offset) - FIRST_VGPR_REG,
+			     REGNO (vgpr_offset) - FIRST_VGPR_REG + 1);
 		}
 	      else
 		output_operand_lossage ("bad ADDR_SPACE_GLOBAL address");
@@ -6143,11 +6416,77 @@ print_operand (FILE *file, rtx x, int code)
   gcc_unreachable ();
 }
 
+/* Implement DBX_REGISTER_NUMBER macro.
+ 
+   Return the DWARF register number that corresponds to the GCC internal
+   REGNO.  */
+
+unsigned int
+gcn_dwarf_register_number (unsigned int regno)
+{
+  /* Registers defined in DWARF.  */
+  if (regno == EXEC_LO_REG)
+    return 17;
+  /* We need to use a more complex DWARF expression for this
+  else if (regno == EXEC_HI_REG)
+    return 17; */
+  else if (regno == VCC_LO_REG)
+    return 768;
+  /* We need to use a more complex DWARF expression for this
+  else if (regno == VCC_HI_REG)
+    return 768;  */
+  else if (regno == SCC_REG)
+    return 128;
+  else if (regno == DWARF_LINK_REGISTER)
+    return 16;
+  else if (SGPR_REGNO_P (regno))
+    {
+      if (regno - FIRST_SGPR_REG < 64)
+	return (regno - FIRST_SGPR_REG + 32);
+      else
+	return (regno - FIRST_SGPR_REG + 1024);
+    }
+  else if (VGPR_REGNO_P (regno))
+    return (regno - FIRST_VGPR_REG + 2560);
+
+  /* Otherwise, there's nothing sensible to do.  */
+  return regno + 100000;
+}
+
+/* Implement TARGET_DWARF_REGISTER_SPAN.
+ 
+   DImode and Vector DImode require additional registers.  */
+
+static rtx
+gcn_dwarf_register_span (rtx rtl)
+{
+  machine_mode mode = GET_MODE (rtl);
+
+  if (VECTOR_MODE_P (mode))
+    mode = GET_MODE_INNER (mode);
+
+  if (GET_MODE_SIZE (mode) != 8)
+    return NULL_RTX;
+
+  unsigned regno = REGNO (rtl);
+
+  if (regno == DWARF_LINK_REGISTER)
+    return NULL_RTX;
+
+  rtx p = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
+  XVECEXP (p, 0, 0) = gen_rtx_REG (SImode, regno);
+  XVECEXP (p, 0, 1) = gen_rtx_REG (SImode, regno + 1);
+
+  return p;
+}
+
 /* }}}  */
 /* {{{ TARGET hook overrides.  */
 
 #undef  TARGET_ADDR_SPACE_ADDRESS_MODE
 #define TARGET_ADDR_SPACE_ADDRESS_MODE gcn_addr_space_address_mode
+#undef  TARGET_ADDR_SPACE_DEBUG
+#define TARGET_ADDR_SPACE_DEBUG gcn_addr_space_debug
 #undef  TARGET_ADDR_SPACE_LEGITIMATE_ADDRESS_P
 #define TARGET_ADDR_SPACE_LEGITIMATE_ADDRESS_P \
   gcn_addr_space_legitimate_address_p
@@ -6191,10 +6530,14 @@ print_operand (FILE *file, rtx x, int code)
 #define TARGET_CONSTANT_ALIGNMENT gcn_constant_alignment
 #undef  TARGET_DEBUG_UNWIND_INFO
 #define TARGET_DEBUG_UNWIND_INFO gcn_debug_unwind_info
+#undef  TARGET_DWARF_REGISTER_SPAN
+#define TARGET_DWARF_REGISTER_SPAN gcn_dwarf_register_span
 #undef  TARGET_EMUTLS_VAR_INIT
 #define TARGET_EMUTLS_VAR_INIT gcn_emutls_var_init
 #undef  TARGET_EXPAND_BUILTIN
 #define TARGET_EXPAND_BUILTIN gcn_expand_builtin
+#undef  TARGET_FRAME_POINTER_REQUIRED
+#define TARGET_FRAME_POINTER_REQUIRED gcn_frame_pointer_rqd
 #undef  TARGET_FUNCTION_ARG
 #undef  TARGET_FUNCTION_ARG_ADVANCE
 #define TARGET_FUNCTION_ARG_ADVANCE gcn_function_arg_advance
@@ -6207,17 +6550,19 @@ print_operand (FILE *file, rtx x, int code)
 #define TARGET_GIMPLIFY_VA_ARG_EXPR gcn_gimplify_va_arg_expr
 #undef TARGET_OMP_DEVICE_KIND_ARCH_ISA
 #define TARGET_OMP_DEVICE_KIND_ARCH_ISA gcn_omp_device_kind_arch_isa
-#undef  TARGET_GOACC_ADJUST_PROPAGATION_RECORD
-#define TARGET_GOACC_ADJUST_PROPAGATION_RECORD \
-  gcn_goacc_adjust_propagation_record
-#undef  TARGET_GOACC_ADJUST_GANGPRIVATE_DECL
-#define TARGET_GOACC_ADJUST_GANGPRIVATE_DECL gcn_goacc_adjust_gangprivate_decl
+#undef  TARGET_GOACC_ADJUST_PRIVATE_DECL
+#define TARGET_GOACC_ADJUST_PRIVATE_DECL gcn_goacc_adjust_private_decl
+#undef  TARGET_GOACC_CREATE_WORKER_BROADCAST_RECORD
+#define TARGET_GOACC_CREATE_WORKER_BROADCAST_RECORD \
+  gcn_goacc_create_worker_broadcast_record
 #undef  TARGET_GOACC_FORK_JOIN
 #define TARGET_GOACC_FORK_JOIN gcn_fork_join
 #undef  TARGET_GOACC_REDUCTION
 #define TARGET_GOACC_REDUCTION gcn_goacc_reduction
 #undef  TARGET_GOACC_VALIDATE_DIMS
 #define TARGET_GOACC_VALIDATE_DIMS gcn_goacc_validate_dims
+#undef  TARGET_GOACC_SHARED_MEM_LAYOUT
+#define TARGET_GOACC_SHARED_MEM_LAYOUT gcn_shared_mem_layout
 #undef  TARGET_HARD_REGNO_MODE_OK
 #define TARGET_HARD_REGNO_MODE_OK gcn_hard_regno_mode_ok
 #undef  TARGET_HARD_REGNO_NREGS
@@ -6226,6 +6571,8 @@ print_operand (FILE *file, rtx x, int code)
 #define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
 #undef  TARGET_INIT_BUILTINS
 #define TARGET_INIT_BUILTINS gcn_init_builtins
+#undef  TARGET_INIT_LIBFUNCS
+#define TARGET_INIT_LIBFUNCS gcn_init_libfuncs
 #undef  TARGET_IRA_CHANGE_PSEUDO_ALLOCNO_CLASS
 #define TARGET_IRA_CHANGE_PSEUDO_ALLOCNO_CLASS \
   gcn_ira_change_pseudo_allocno_class
@@ -6256,6 +6603,8 @@ print_operand (FILE *file, rtx x, int code)
 #define TARGET_SECONDARY_RELOAD gcn_secondary_reload
 #undef  TARGET_SECTION_TYPE_FLAGS
 #define TARGET_SECTION_TYPE_FLAGS gcn_section_type_flags
+#undef  TARGET_SCALAR_MODE_SUPPORTED_P
+#define TARGET_SCALAR_MODE_SUPPORTED_P gcn_scalar_mode_supported_p
 #undef  TARGET_SMALL_REGISTER_CLASSES_FOR_MODE_P
 #define TARGET_SMALL_REGISTER_CLASSES_FOR_MODE_P \
   gcn_small_register_classes_for_mode_p

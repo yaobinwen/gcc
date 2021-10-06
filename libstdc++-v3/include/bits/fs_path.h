@@ -1,6 +1,6 @@
 // Class filesystem::path -*- C++ -*-
 
-// Copyright (C) 2014-2020 Free Software Foundation, Inc.
+// Copyright (C) 2014-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -32,7 +32,6 @@
 
 #if __cplusplus >= 201703L
 
-#include <utility>
 #include <type_traits>
 #include <locale>
 #include <iosfwd>
@@ -41,6 +40,7 @@
 #include <string_view>
 #include <system_error>
 #include <bits/stl_algobase.h>
+#include <bits/stl_pair.h>
 #include <bits/locale_conv.h>
 #include <ext/concurrence.h>
 #include <bits/shared_ptr.h>
@@ -63,15 +63,13 @@ namespace filesystem
 {
 _GLIBCXX_BEGIN_NAMESPACE_CXX11
 
-  /** @addtogroup filesystem
-   *  @{
-   */
-
   class path;
 
   /// @cond undocumented
 namespace __detail
 {
+  /// @addtogroup filesystem
+  /// @{
   template<typename _CharT>
     inline constexpr bool __is_encoded_char = false;
   template<>
@@ -211,10 +209,42 @@ namespace __detail
 #endif
 			 , _Val>;
 
+  // Create a string or string view from an iterator range.
+  template<typename _InputIterator>
+    inline auto
+    __string_from_range(_InputIterator __first, _InputIterator __last)
+    {
+      using _EcharT
+	= typename std::iterator_traits<_InputIterator>::value_type;
+      static_assert(__is_encoded_char<_EcharT>);
+
+#if __cpp_lib_concepts
+      constexpr bool __contiguous = std::contiguous_iterator<_InputIterator>;
+#else
+      constexpr bool __contiguous
+	= is_pointer_v<decltype(std::__niter_base(__first))>;
+#endif
+      if constexpr (__contiguous)
+	{
+	  // For contiguous iterators we can just return a string view.
+	  const auto* __f = std::__to_address(std::__niter_base(__first));
+	  const auto* __l = std::__to_address(std::__niter_base(__last));
+	  return basic_string_view<_EcharT>(__f, __l - __f);
+	}
+      else
+	// Conversion requires contiguous characters, so create a string.
+	return basic_string<_EcharT>(__first, __last);
+    }
+
+  /// @} group filesystem
 } // namespace __detail
   /// @endcond
 
-  /// A filesystem path.
+  /// @addtogroup filesystem
+  /// @{
+
+  /// A filesystem path
+  /// @ingroup filesystem
   class path
   {
   public:
@@ -459,8 +489,8 @@ namespace __detail
     class iterator;
     using const_iterator = iterator;
 
-    iterator begin() const;
-    iterator end() const;
+    iterator begin() const noexcept;
+    iterator end() const noexcept;
 
     /// Write a path to a stream
     template<typename _CharT, typename _Traits>
@@ -486,13 +516,13 @@ namespace __detail
 
     /// Compare paths
     friend bool operator==(const path& __lhs, const path& __rhs) noexcept
-    { return __lhs.compare(__rhs) == 0; }
+    { return path::_S_compare(__lhs, __rhs) == 0; }
 
 #if __cpp_lib_three_way_comparison
     /// Compare paths
     friend strong_ordering
     operator<=>(const path& __lhs, const path& __rhs) noexcept
-    { return __lhs.compare(__rhs) <=> 0; }
+    { return path::_S_compare(__lhs, __rhs) <=> 0; }
 #else
     /// Compare paths
     friend bool operator!=(const path& __lhs, const path& __rhs) noexcept
@@ -542,33 +572,6 @@ namespace __detail
 
     pair<const string_type*, size_t> _M_find_extension() const noexcept;
 
-    // Create a string or string view from an iterator range.
-    template<typename _InputIterator>
-      static auto
-      _S_to_string(_InputIterator __first, _InputIterator __last)
-      {
-	using _EcharT
-	  = typename std::iterator_traits<_InputIterator>::value_type;
-	static_assert(__detail::__is_encoded_char<_EcharT>);
-
-#if __cpp_lib_concepts
-	constexpr bool __contiguous = std::contiguous_iterator<_InputIterator>;
-#else
-	constexpr bool __contiguous
-	  = is_pointer_v<decltype(std::__niter_base(__first))>;
-#endif
-	if constexpr (__contiguous)
-	  {
-	    // For contiguous iterators we can just return a string view.
-	    const auto* __f = std::__to_address(std::__niter_base(__first));
-	    const auto* __l = std::__to_address(std::__niter_base(__last));
-	    return basic_string_view<_EcharT>(__f, __l - __f);
-	  }
-	else
-	  // Conversion requires contiguous characters, so create a string.
-	  return basic_string<_EcharT>(__first, __last);
-      }
-
     // path::_S_convert creates a basic_string<value_type> or
     // basic_string_view<value_type> from a range (either the effective
     // range of a Source parameter, or a pair of InputIterator parameters),
@@ -602,7 +605,7 @@ namespace __detail
     template<typename _Iter>
       static auto
       _S_convert(_Iter __first, _Iter __last)
-      { return _S_convert(_S_to_string(__first, __last)); }
+      { return _S_convert(__detail::__string_from_range(__first, __last)); }
 
     static string_type
     _S_convert_loc(const char* __first, const char* __last,
@@ -612,7 +615,7 @@ namespace __detail
       static string_type
       _S_convert_loc(_Iter __first, _Iter __last, const std::locale& __loc)
       {
-	const auto __s = _S_to_string(__first, __last);
+	const auto __s = __detail::__string_from_range(__first, __last);
 	return _S_convert_loc(__s.data(), __s.data() + __s.size(), __loc);
       }
 
@@ -626,6 +629,11 @@ namespace __detail
     template<typename _CharT, typename _Traits, typename _Allocator>
       static basic_string<_CharT, _Traits, _Allocator>
       _S_str_convert(basic_string_view<value_type>, const _Allocator&);
+
+    // Returns lhs.compare(rhs), but defined after path::iterator is complete.
+    __attribute__((__always_inline__))
+    static int
+    _S_compare(const path& __lhs, const path& __rhs) noexcept;
 
     void _M_split_cmpts();
 
@@ -649,7 +657,7 @@ namespace __detail
       ~_List() = default;
 
       _Type type() const noexcept
-      { return _Type{reinterpret_cast<uintptr_t>(_M_impl.get()) & 0x3}; }
+      { return _Type(reinterpret_cast<uintptr_t>(_M_impl.get()) & 0x3); }
 
       void type(_Type) noexcept;
 
@@ -663,10 +671,10 @@ namespace __detail
       // All the member functions below here have a precondition !empty()
       // (and they should only be called from within the library).
 
-      iterator begin();
-      iterator end();
-      const_iterator begin() const;
-      const_iterator end() const;
+      iterator begin() noexcept;
+      iterator end() noexcept;
+      const_iterator begin() const noexcept;
+      const_iterator end() const noexcept;
 
       value_type& front() noexcept;
       value_type& back() noexcept;
@@ -688,7 +696,8 @@ namespace __detail
     struct _Parser;
   };
 
-  /// @relates std::filesystem::path @{
+  /// @{
+  /// @relates std::filesystem::path
 
   inline void swap(path& __lhs, path& __rhs) noexcept { __lhs.swap(__rhs); }
 
@@ -725,6 +734,37 @@ namespace __detail
     std::__shared_ptr<const _Impl> _M_impl;
   };
 
+  /// @cond undocumented
+namespace __detail
+{
+  [[noreturn]] inline void
+  __throw_conversion_error()
+  {
+    _GLIBCXX_THROW_OR_ABORT(filesystem_error(
+	 "Cannot convert character sequence",
+	 std::make_error_code(errc::illegal_byte_sequence)));
+  }
+
+#ifdef _GLIBCXX_FILESYSTEM_IS_WINDOWS
+  template<typename _Tp>
+    inline std::wstring
+    __wstr_from_utf8(const _Tp& __str)
+    {
+      static_assert(std::is_same_v<typename _Tp::value_type, char>);
+      std::wstring __wstr;
+      // XXX This assumes native wide encoding is UTF-16.
+      std::codecvt_utf8_utf16<wchar_t> __wcvt;
+      const auto __p = __str.data();
+      if (!__str_codecvt_in_all(__p, __p + __str.size(), __wstr, __wcvt))
+	__detail::__throw_conversion_error();
+      return __wstr;
+    }
+#endif
+
+} // namespace __detail
+  /// @endcond
+
+
   /** Create a path from a UTF-8-encoded sequence of char
    *
    * @relates std::filesystem::path
@@ -738,28 +778,10 @@ namespace __detail
     {
 #ifdef _GLIBCXX_FILESYSTEM_IS_WINDOWS
       if constexpr (is_same_v<_CharT, char>)
-	{
-	  // XXX This assumes native wide encoding is UTF-16.
-	  std::codecvt_utf8_utf16<path::value_type> __cvt;
-	  path::string_type __tmp;
-	  if constexpr (is_pointer_v<_InputIterator>)
-	    {
-	      if (__str_codecvt_in_all(__first, __last, __tmp, __cvt))
-		return path{ __tmp };
-	    }
-	  else
-	    {
-	      const std::string __u8str{__first, __last};
-	      const char* const __p = __u8str.data();
-	      if (__str_codecvt_in_all(__p, __p + __u8str.size(), __tmp, __cvt))
-		return path{ __tmp };
-	    }
-	  _GLIBCXX_THROW_OR_ABORT(filesystem_error(
-	      "Cannot convert character sequence",
-	      std::make_error_code(errc::illegal_byte_sequence)));
-	}
+	return path{ __detail::__wstr_from_utf8(
+	    __detail::__string_from_range(__first, __last)) };
       else
-	return path{ __first, __last };
+	return path{ __first, __last }; // constructor handles char8_t
 #else
       // This assumes native normal encoding is UTF-8.
       return path{ __first, __last };
@@ -778,21 +800,12 @@ namespace __detail
     {
 #ifdef _GLIBCXX_FILESYSTEM_IS_WINDOWS
       if constexpr (is_same_v<_CharT, char>)
-	{
-	  if constexpr (is_convertible_v<const _Source&, std::string_view>)
-	    {
-	      const std::string_view __s = __source;
-	      return filesystem::u8path(__s.data(), __s.data() + __s.size());
-	    }
-	  else
-	    {
-	      std::string __s = path::_S_string_from_iter(__source);
-	      return filesystem::u8path(__s.data(), __s.data() + __s.size());
-	    }
-	}
+	return path{ __detail::__wstr_from_utf8(
+	    __detail::__effective_range(__source)) };
       else
-	return path{ __source };
+	return path{ __source }; // constructor handles char8_t
 #else
+      // This assumes native normal encoding is UTF-8.
       return path{ __source };
 #endif
     }
@@ -836,11 +849,8 @@ namespace __detail
 #ifdef _GLIBCXX_USE_CHAR8_T
 	  else if constexpr (is_same_v<_EcharT, char8_t>)
 	    {
-	      const char* __f2 = (const char*)__f;
-	      const char* __l2 = (const char*)__l;
-	      std::codecvt_utf8_utf16<wchar_t> __wcvt;
-	      if (__str_codecvt_in_all(__f2, __l2, __wstr, __wcvt))
-		return __wstr;
+	      const auto __f2 = reinterpret_cast<const char*>(__f);
+	      return __detail::__wstr_from_utf8(string_view(__f2, __l - __f));
 	    }
 #endif
 	  else // char16_t or char32_t
@@ -849,13 +859,7 @@ namespace __detail
 	      { } __cvt;
 	      std::string __str;
 	      if (__str_codecvt_out_all(__f, __l, __str, __cvt))
-		{
-		  const char* __f2 = __str.data();
-		  const char* __l2 = __f2 + __str.size();
-		  std::codecvt_utf8_utf16<wchar_t> __wcvt;
-		  if (__str_codecvt_in_all(__f2, __l2, __wstr, __wcvt))
-		    return __wstr;
-		}
+		return __detail::__wstr_from_utf8(__str);
 	    }
 #else // ! windows
 	  struct _UCvt : std::codecvt<_EcharT, char, std::mbstate_t>
@@ -864,9 +868,7 @@ namespace __detail
 	  if (__str_codecvt_out_all(__f, __l, __str, __cvt))
 	    return __str;
 #endif
-	  _GLIBCXX_THROW_OR_ABORT(filesystem_error(
-		"Cannot convert character sequence",
-		std::make_error_code(errc::illegal_byte_sequence)));
+	  __detail::__throw_conversion_error();
 	}
     }
 
@@ -882,33 +884,42 @@ namespace __detail
     using pointer		= const path*;
     using iterator_category	= std::bidirectional_iterator_tag;
 
-    iterator() : _M_path(nullptr), _M_cur(), _M_at_end() { }
+    iterator() noexcept : _M_path(nullptr), _M_cur(), _M_at_end() { }
 
     iterator(const iterator&) = default;
     iterator& operator=(const iterator&) = default;
 
-    reference operator*() const;
-    pointer   operator->() const { return std::__addressof(**this); }
+    reference operator*() const noexcept;
+    pointer   operator->() const noexcept { return std::__addressof(**this); }
 
-    iterator& operator++();
-    iterator  operator++(int) { auto __tmp = *this; ++*this; return __tmp; }
+    iterator& operator++() noexcept;
 
-    iterator& operator--();
-    iterator  operator--(int) { auto __tmp = *this; --*this; return __tmp; }
+    iterator  operator++(int) noexcept
+    { auto __tmp = *this; ++*this; return __tmp; }
 
-    friend bool operator==(const iterator& __lhs, const iterator& __rhs)
+    iterator& operator--() noexcept;
+
+    iterator  operator--(int) noexcept
+    { auto __tmp = *this; --*this; return __tmp; }
+
+    friend bool
+    operator==(const iterator& __lhs, const iterator& __rhs) noexcept
     { return __lhs._M_equals(__rhs); }
 
-    friend bool operator!=(const iterator& __lhs, const iterator& __rhs)
+    friend bool
+    operator!=(const iterator& __lhs, const iterator& __rhs) noexcept
     { return !__lhs._M_equals(__rhs); }
 
   private:
     friend class path;
 
-    bool _M_is_multi() const { return _M_path->_M_type() == _Type::_Multi; }
+    bool
+    _M_is_multi() const noexcept
+    { return _M_path->_M_type() == _Type::_Multi; }
 
     friend difference_type
     __path_iter_distance(const iterator& __first, const iterator& __last)
+    noexcept
     {
       __glibcxx_assert(__first._M_path != nullptr);
       __glibcxx_assert(__first._M_path == __last._M_path);
@@ -921,7 +932,7 @@ namespace __detail
     }
 
     friend void
-    __path_iter_advance(iterator& __i, difference_type __n)
+    __path_iter_advance(iterator& __i, difference_type __n) noexcept
     {
       if (__n == 1)
 	++__i;
@@ -936,15 +947,15 @@ namespace __detail
 	}
     }
 
-    iterator(const path* __path, path::_List::const_iterator __iter)
+    iterator(const path* __path, path::_List::const_iterator __iter) noexcept
     : _M_path(__path), _M_cur(__iter), _M_at_end()
     { }
 
-    iterator(const path* __path, bool __at_end)
+    iterator(const path* __path, bool __at_end) noexcept
     : _M_path(__path), _M_cur(), _M_at_end(__at_end)
     { }
 
-    bool _M_equals(iterator) const;
+    bool _M_equals(iterator) const noexcept;
 
     const path* 		_M_path;
     path::_List::const_iterator _M_cur;
@@ -1076,9 +1087,7 @@ namespace __detail
 #ifdef _GLIBCXX_FILESYSTEM_IS_WINDOWS
       } }
 #endif
-      _GLIBCXX_THROW_OR_ABORT(filesystem_error(
-	    "Cannot convert character sequence",
-	    std::make_error_code(errc::illegal_byte_sequence)));
+      __detail::__throw_conversion_error();
     }
   /// @endcond
 
@@ -1115,9 +1124,7 @@ namespace __detail
     const value_type* __last = __first + _M_pathname.size();
     if (__str_codecvt_out_all(__first, __last, __str, __cvt))
       return __str;
-    _GLIBCXX_THROW_OR_ABORT(filesystem_error(
-	  "Cannot convert character sequence",
-	  std::make_error_code(errc::illegal_byte_sequence)));
+    __detail::__throw_conversion_error();
 #else
     return _M_pathname;
 #endif
@@ -1268,7 +1275,7 @@ namespace __detail
   }
 
   inline path::iterator
-  path::begin() const
+  path::begin() const noexcept
   {
     if (_M_type() == _Type::_Multi)
       return iterator(this, _M_cmpts.begin());
@@ -1276,7 +1283,7 @@ namespace __detail
   }
 
   inline path::iterator
-  path::end() const
+  path::end() const noexcept
   {
     if (_M_type() == _Type::_Multi)
       return iterator(this, _M_cmpts.end());
@@ -1284,10 +1291,10 @@ namespace __detail
   }
 
   inline path::iterator&
-  path::iterator::operator++()
+  path::iterator::operator++() noexcept
   {
     __glibcxx_assert(_M_path != nullptr);
-    if (_M_path->_M_type() == _Type::_Multi)
+    if (_M_is_multi())
       {
 	__glibcxx_assert(_M_cur != _M_path->_M_cmpts.end());
 	++_M_cur;
@@ -1301,10 +1308,10 @@ namespace __detail
   }
 
   inline path::iterator&
-  path::iterator::operator--()
+  path::iterator::operator--() noexcept
   {
     __glibcxx_assert(_M_path != nullptr);
-    if (_M_path->_M_type() == _Type::_Multi)
+    if (_M_is_multi())
       {
 	__glibcxx_assert(_M_cur != _M_path->_M_cmpts.begin());
 	--_M_cur;
@@ -1318,10 +1325,10 @@ namespace __detail
   }
 
   inline path::iterator::reference
-  path::iterator::operator*() const
+  path::iterator::operator*() const noexcept
   {
     __glibcxx_assert(_M_path != nullptr);
-    if (_M_path->_M_type() == _Type::_Multi)
+    if (_M_is_multi())
       {
 	__glibcxx_assert(_M_cur != _M_path->_M_cmpts.end());
 	return *_M_cur;
@@ -1330,31 +1337,44 @@ namespace __detail
   }
 
   inline bool
-  path::iterator::_M_equals(iterator __rhs) const
+  path::iterator::_M_equals(iterator __rhs) const noexcept
   {
     if (_M_path != __rhs._M_path)
       return false;
     if (_M_path == nullptr)
       return true;
-    if (_M_path->_M_type() == path::_Type::_Multi)
+    if (_M_is_multi())
       return _M_cur == __rhs._M_cur;
     return _M_at_end == __rhs._M_at_end;
   }
 
-  // @} group filesystem
+  // Define this now that path and path::iterator are complete.
+  // It needs to consider the string_view(Range&&) constructor during
+  // overload resolution, which depends on whether range<path> is satisfied,
+  // which depends on whether path::iterator is complete.
+  inline int
+  path::_S_compare(const path& __lhs, const path& __rhs) noexcept
+  { return __lhs.compare(__rhs); }
+
+  /// @} group filesystem
 _GLIBCXX_END_NAMESPACE_CXX11
 } // namespace filesystem
 
+/// @cond undocumented
+
 inline ptrdiff_t
 distance(filesystem::path::iterator __first, filesystem::path::iterator __last)
+noexcept
 { return __path_iter_distance(__first, __last); }
 
-template<typename _InputIterator, typename _Distance>
-  void
-  advance(filesystem::path::iterator& __i, _Distance __n)
+template<typename _Distance>
+  inline void
+  advance(filesystem::path::iterator& __i, _Distance __n) noexcept
   { __path_iter_advance(__i, static_cast<ptrdiff_t>(__n)); }
 
 extern template class __shared_ptr<const filesystem::filesystem_error::_Impl>;
+
+/// @endcond
 
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std

@@ -1,5 +1,5 @@
 /* Header for array handling functions
-   Copyright (C) 2002-2020 Free Software Foundation, Inc.
+   Copyright (C) 2002-2021 Free Software Foundation, Inc.
    Contributed by Paul Brook
 
 This file is part of GCC.
@@ -38,6 +38,8 @@ void gfc_trans_auto_array_allocation (tree, gfc_symbol *, gfc_wrapped_block *);
 void gfc_trans_dummy_array_bias (gfc_symbol *, tree, gfc_wrapped_block *);
 /* Generate entry and exit code for g77 calling convention arrays.  */
 void gfc_trans_g77_array (gfc_symbol *, gfc_wrapped_block *);
+
+tree gfc_tree_array_size (stmtblock_t *, tree, gfc_expr *, tree);
 
 tree gfc_full_array_size (stmtblock_t *, tree, int);
 

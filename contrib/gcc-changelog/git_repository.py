@@ -26,11 +26,44 @@ except ImportError:
     print('  Debian, Ubuntu: python3-git')
     exit(1)
 
-from git_commit import GitCommit
+from git_commit import GitCommit, GitInfo, decode_path
 
 
-def parse_git_revisions(repo_path, revisions, strict=False):
+def parse_git_revisions(repo_path, revisions, ref_name=None):
     repo = Repo(repo_path)
+
+    def commit_to_info(commit):
+        try:
+            c = repo.commit(commit)
+            diff = repo.commit(commit + '~').diff(commit)
+
+            modified_files = []
+            for file in diff:
+                if hasattr(file, 'renamed_file'):
+                    is_renamed = file.renamed_file
+                else:
+                    is_renamed = file.renamed
+                if file.new_file:
+                    t = 'A'
+                elif file.deleted_file:
+                    t = 'D'
+                elif is_renamed:
+                    # Consider that renamed files are two operations:
+                    # the deletion of the original name
+                    # and the addition of the new one.
+                    modified_files.append((decode_path(file.a_path), 'D'))
+                    t = 'A'
+                else:
+                    t = 'M'
+                modified_files.append((decode_path(file.b_path), t))
+
+            date = datetime.utcfromtimestamp(c.committed_date)
+            author = '%s  <%s>' % (c.author.name, c.author.email)
+            git_info = GitInfo(c.hexsha, date, author,
+                               c.message.split('\n'), modified_files)
+            return git_info
+        except ValueError:
+            return None
 
     parsed_commits = []
     if '..' in revisions:
@@ -39,22 +72,8 @@ def parse_git_revisions(repo_path, revisions, strict=False):
         commits = [repo.commit(revisions)]
 
     for commit in commits:
-        diff = repo.commit(commit.hexsha + '~').diff(commit.hexsha)
-
-        modified_files = []
-        for file in diff:
-            if file.new_file:
-                t = 'A'
-            elif file.deleted_file:
-                t = 'D'
-            else:
-                t = 'M'
-            modified_files.append((file.b_path, t))
-
-        date = datetime.utcfromtimestamp(commit.committed_date)
-        author = '%s  <%s>' % (commit.author.name, commit.author.email)
-        git_commit = GitCommit(commit.hexsha, date, author,
-                               commit.message.split('\n'), modified_files,
-                               strict=strict)
+        git_commit = GitCommit(commit_to_info(commit.hexsha),
+                               commit_to_info_hook=commit_to_info,
+                               ref_name=ref_name)
         parsed_commits.append(git_commit)
     return parsed_commits

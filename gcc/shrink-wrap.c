@@ -1,5 +1,5 @@
 /* Shrink-wrapping related optimizations.
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -43,6 +43,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "rtl-iter.h"
 #include "valtrack.h"
 #include "function-abi.h"
+#include "print-rtl.h"
 
 /* Return true if INSN requires the stack frame to be set up.
    PROLOGUE_USED contains the hard registers used in the function
@@ -56,7 +57,7 @@ requires_stack_frame_p (rtx_insn *insn, HARD_REG_SET prologue_used,
   HARD_REG_SET hardregs;
   unsigned regno;
 
-  if (CALL_P (insn))
+  if (CALL_P (insn) && !FAKE_CALL_P (insn))
     return !SIBLING_CALL_P (insn);
 
   /* We need a frame to get the unique CFA expected by the unwinder.  */
@@ -493,7 +494,7 @@ can_get_prologue (basic_block pro, HARD_REG_SET prologue_clobbered)
   edge e;
   edge_iterator ei;
   FOR_EACH_EDGE (e, ei, pro->preds)
-    if (e->flags & (EDGE_COMPLEX | EDGE_CROSSING)
+    if (e->flags & EDGE_COMPLEX
 	&& !dominated_by_p (CDI_DOMINATORS, e->src, pro))
       return false;
 
@@ -735,7 +736,11 @@ try_shrink_wrapping (edge *entry_edge, rtx_insn *prologue_seq)
 				       set_up_by_prologue.set))
 	  {
 	    if (dump_file)
-	      fprintf (dump_file, "Block %d needs the prologue.\n", bb->index);
+	      {
+		fprintf (dump_file, "Block %d needs prologue due to insn %d:\n",
+			 bb->index, INSN_UID (insn));
+		print_rtl_single (dump_file, insn);
+	      }
 	    pro = nearest_common_dominator (CDI_DOMINATORS, pro, bb);
 	    break;
 	  }
@@ -1767,9 +1772,6 @@ insert_prologue_epilogue_for_components (sbitmap components)
 void
 try_shrink_wrapping_separate (basic_block first_bb)
 {
-  if (HAVE_cc0)
-    return;
-
   if (!(SHRINK_WRAPPING_ENABLED
 	&& flag_shrink_wrap_separate
 	&& optimize_function_for_speed_p (cfun)

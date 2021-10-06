@@ -1,4 +1,4 @@
-/* Copyright (C) 1988-2020 Free Software Foundation, Inc.
+/* Copyright (C) 1988-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -90,6 +90,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "debug.h"
 #include "dwarf2out.h"
 #include "i386-builtins.h"
+#include "common/config/i386/i386-isas.h"
 
 #undef BDESC
 #undef BDESC_FIRST
@@ -107,23 +108,24 @@ BDESC_VERIFYS (IX86_BUILTIN__BDESC_PCMPISTR_FIRST,
 	       IX86_BUILTIN__BDESC_PCMPESTR_LAST, 1);
 BDESC_VERIFYS (IX86_BUILTIN__BDESC_SPECIAL_ARGS_FIRST,
 	       IX86_BUILTIN__BDESC_PCMPISTR_LAST, 1);
-BDESC_VERIFYS (IX86_BUILTIN__BDESC_ARGS_FIRST,
+BDESC_VERIFYS (IX86_BUILTIN__BDESC_PURE_ARGS_FIRST,
 	       IX86_BUILTIN__BDESC_SPECIAL_ARGS_LAST, 1);
+BDESC_VERIFYS (IX86_BUILTIN__BDESC_ARGS_FIRST,
+	       IX86_BUILTIN__BDESC_PURE_ARGS_LAST, 1);
 BDESC_VERIFYS (IX86_BUILTIN__BDESC_ROUND_ARGS_FIRST,
 	       IX86_BUILTIN__BDESC_ARGS_LAST, 1);
 BDESC_VERIFYS (IX86_BUILTIN__BDESC_MULTI_ARG_FIRST,
 	       IX86_BUILTIN__BDESC_ROUND_ARGS_LAST, 1);
 BDESC_VERIFYS (IX86_BUILTIN__BDESC_CET_FIRST,
 	       IX86_BUILTIN__BDESC_MULTI_ARG_LAST, 1);
-BDESC_VERIFYS (IX86_BUILTIN__BDESC_CET_NORMAL_FIRST,
-	       IX86_BUILTIN__BDESC_CET_LAST, 1);
 BDESC_VERIFYS (IX86_BUILTIN_MAX,
-	       IX86_BUILTIN__BDESC_CET_NORMAL_LAST, 1);
+	       IX86_BUILTIN__BDESC_CET_LAST, 1);
 
 
 /* Table for the ix86 builtin non-function types.  */
 static GTY(()) tree ix86_builtin_type_tab[(int) IX86_BT_LAST_CPTR + 1];
 
+tree ix86_float16_type_node = NULL_TREE;
 /* Retrieve an element from the above table, building some of
    the types lazily.  */
 
@@ -275,6 +277,10 @@ def_builtin (HOST_WIDE_INT mask, HOST_WIDE_INT mask2,
       if (((mask2 == 0 || (mask2 & ix86_isa_flags2) != 0)
 	   && (mask == 0 || (mask & ix86_isa_flags) != 0))
 	  || ((mask & OPTION_MASK_ISA_MMX) != 0 && TARGET_MMX_WITH_SSE)
+	  /* "Unified" builtin used by either AVXVNNI intrinsics or AVX512VNNIVL
+	     non-mask intrinsics should be defined whenever avxvnni
+	     or avx512vnni && avx512vl exist.  */
+	  || (mask2 == OPTION_MASK_ISA2_AVXVNNI)
 	  || (lang_hooks.builtin_function
 	      == lang_hooks.builtin_function_ext_scope))
 	{
@@ -524,7 +530,23 @@ ix86_init_mmx_sse_builtins (void)
 		 IX86_BUILTIN__BDESC_SPECIAL_ARGS_FIRST,
 		 ARRAY_SIZE (bdesc_special_args) - 1);
 
-  /* Add all builtins with variable number of operands.  */
+  /* Add all pure builtins with variable number of operands.  */
+  for (i = 0, d = bdesc_pure_args;
+       i < ARRAY_SIZE (bdesc_pure_args);
+       i++, d++)
+    {
+      BDESC_VERIFY (d->code, IX86_BUILTIN__BDESC_PURE_ARGS_FIRST, i);
+      if (d->name == 0)
+	continue;
+
+      ftype = (enum ix86_builtin_func_type) d->flag;
+      def_builtin_pure (d->mask, d->mask2, d->name, ftype, d->code);
+    }
+  BDESC_VERIFYS (IX86_BUILTIN__BDESC_PURE_ARGS_LAST,
+		 IX86_BUILTIN__BDESC_PURE_ARGS_FIRST,
+		 ARRAY_SIZE (bdesc_pure_args) - 1);
+
+  /* Add all const builtins with variable number of operands.  */
   for (i = 0, d = bdesc_args;
        i < ARRAY_SIZE (bdesc_args);
        i++, d++)
@@ -625,9 +647,9 @@ ix86_init_mmx_sse_builtins (void)
 			    VOID_FTYPE_VOID, IX86_BUILTIN_MFENCE);
 
   /* SSE3.  */
-  def_builtin (OPTION_MASK_ISA_SSE3, 0, "__builtin_ia32_monitor",
+  def_builtin (0, OPTION_MASK_ISA2_MWAIT, "__builtin_ia32_monitor",
 	       VOID_FTYPE_PCVOID_UNSIGNED_UNSIGNED, IX86_BUILTIN_MONITOR);
-  def_builtin (OPTION_MASK_ISA_SSE3, 0, "__builtin_ia32_mwait",
+  def_builtin (0, OPTION_MASK_ISA2_MWAIT, "__builtin_ia32_mwait",
 	       VOID_FTYPE_UNSIGNED_UNSIGNED, IX86_BUILTIN_MWAIT);
 
   /* AES */
@@ -1195,6 +1217,11 @@ ix86_init_mmx_sse_builtins (void)
   def_builtin (0, OPTION_MASK_ISA2_WAITPKG, "__builtin_ia32_tpause",
 	       UINT8_FTYPE_UNSIGNED_UINT64, IX86_BUILTIN_TPAUSE);
 
+  /* UINTR.  */
+  def_builtin (OPTION_MASK_ISA_64BIT, OPTION_MASK_ISA2_UINTR,
+	       "__builtin_ia32_testui",
+	       UINT8_FTYPE_VOID, IX86_BUILTIN_TESTUI);
+
   /* CLDEMOTE.  */
   def_builtin (0, OPTION_MASK_ISA2_CLDEMOTE, "__builtin_ia32_cldemote",
 	       VOID_FTYPE_PCVOID, IX86_BUILTIN_CLDEMOTE);
@@ -1226,21 +1253,6 @@ ix86_init_mmx_sse_builtins (void)
   BDESC_VERIFYS (IX86_BUILTIN__BDESC_CET_LAST,
 		 IX86_BUILTIN__BDESC_CET_FIRST,
 		 ARRAY_SIZE (bdesc_cet) - 1);
-
-  for (i = 0, d = bdesc_cet_rdssp;
-       i < ARRAY_SIZE (bdesc_cet_rdssp);
-       i++, d++)
-    {
-      BDESC_VERIFY (d->code, IX86_BUILTIN__BDESC_CET_NORMAL_FIRST, i);
-      if (d->name == 0)
-	continue;
-
-      ftype = (enum ix86_builtin_func_type) d->flag;
-      def_builtin (d->mask, d->mask2, d->name, ftype, d->code);
-    }
-  BDESC_VERIFYS (IX86_BUILTIN__BDESC_CET_NORMAL_LAST,
-		 IX86_BUILTIN__BDESC_CET_NORMAL_FIRST,
-		 ARRAY_SIZE (bdesc_cet_rdssp) - 1);
 }
 
 #undef BDESC_VERIFY
@@ -1333,6 +1345,26 @@ ix86_init_builtins_va_builtins_abi (void)
 }
 
 static void
+ix86_register_float16_builtin_type (void)
+{
+  /* Provide the _Float16 type and float16_type_node if needed so that
+     it can be used in AVX512FP16 intrinsics and builtins.  */
+  if (!float16_type_node)
+    {
+      ix86_float16_type_node = make_node (REAL_TYPE);
+      TYPE_PRECISION (ix86_float16_type_node) = 16;
+      SET_TYPE_MODE (ix86_float16_type_node, HFmode);
+      layout_type (ix86_float16_type_node);
+    }
+  else
+    ix86_float16_type_node = float16_type_node;
+
+  if (!maybe_get_identifier ("_Float16") && TARGET_SSE2)
+    lang_hooks.types.register_builtin_type (ix86_float16_type_node,
+					    "_Float16");
+}
+
+static void
 ix86_init_builtin_types (void)
 {
   tree float80_type_node, const_string_type_node;
@@ -1359,6 +1391,8 @@ ix86_init_builtin_types (void)
      _Float128, so we only need to register the __float128 name for
      it.  */
   lang_hooks.types.register_builtin_type (float128_type_node, "__float128");
+
+  ix86_register_float16_builtin_type ();
 
   const_string_type_node
     = build_pointer_type (build_qualified_type
@@ -1835,237 +1869,6 @@ ix86_builtin_reciprocal (tree fndecl)
     }
 }
 
-/* Priority of i386 features, greater value is higher priority.   This is
-   used to decide the order in which function dispatch must happen.  For
-   instance, a version specialized for SSE4.2 should be checked for dispatch
-   before a version for SSE3, as SSE4.2 implies SSE3.  */
-enum feature_priority
-{
-  P_ZERO = 0,
-  P_MMX,
-  P_SSE,
-  P_SSE2,
-  P_SSE3,
-  P_SSSE3,
-  P_PROC_SSSE3,
-  P_SSE4_A,
-  P_PROC_SSE4_A,
-  P_SSE4_1,
-  P_SSE4_2,
-  P_PROC_SSE4_2,
-  P_POPCNT,
-  P_AES,
-  P_PCLMUL,
-  P_AVX,
-  P_PROC_AVX,
-  P_BMI,
-  P_PROC_BMI,
-  P_FMA4,
-  P_XOP,
-  P_PROC_XOP,
-  P_FMA,
-  P_PROC_FMA,
-  P_BMI2,
-  P_AVX2,
-  P_PROC_AVX2,
-  P_AVX512F,
-  P_PROC_AVX512F
-};
-
-/* This is the order of bit-fields in __processor_features in cpuinfo.c */
-enum processor_features
-{
-  F_CMOV = 0,
-  F_MMX,
-  F_POPCNT,
-  F_SSE,
-  F_SSE2,
-  F_SSE3,
-  F_SSSE3,
-  F_SSE4_1,
-  F_SSE4_2,
-  F_AVX,
-  F_AVX2,
-  F_SSE4_A,
-  F_FMA4,
-  F_XOP,
-  F_FMA,
-  F_AVX512F,
-  F_BMI,
-  F_BMI2,
-  F_AES,
-  F_PCLMUL,
-  F_AVX512VL,
-  F_AVX512BW,
-  F_AVX512DQ,
-  F_AVX512CD,
-  F_AVX512ER,
-  F_AVX512PF,
-  F_AVX512VBMI,
-  F_AVX512IFMA,
-  F_AVX5124VNNIW,
-  F_AVX5124FMAPS,
-  F_AVX512VPOPCNTDQ,
-  F_AVX512VBMI2,
-  F_GFNI,
-  F_VPCLMULQDQ,
-  F_AVX512VNNI,
-  F_AVX512BITALG,
-  F_AVX512BF16,
-  F_AVX512VP2INTERSECT,
-  F_MAX
-};
-
-/* These are the values for vendor types and cpu types  and subtypes
-   in cpuinfo.c.  Cpu types and subtypes should be subtracted by
-   the corresponding start value.  */
-enum processor_model
-{
-  M_INTEL = 1,
-  M_AMD,
-  M_CPU_TYPE_START,
-  M_INTEL_BONNELL,
-  M_INTEL_CORE2,
-  M_INTEL_COREI7,
-  M_AMDFAM10H,
-  M_AMDFAM15H,
-  M_INTEL_SILVERMONT,
-  M_INTEL_KNL,
-  M_AMD_BTVER1,
-  M_AMD_BTVER2,
-  M_AMDFAM17H,
-  M_INTEL_KNM,
-  M_INTEL_GOLDMONT,
-  M_INTEL_GOLDMONT_PLUS,
-  M_INTEL_TREMONT,
-  M_CPU_SUBTYPE_START,
-  M_INTEL_COREI7_NEHALEM,
-  M_INTEL_COREI7_WESTMERE,
-  M_INTEL_COREI7_SANDYBRIDGE,
-  M_AMDFAM10H_BARCELONA,
-  M_AMDFAM10H_SHANGHAI,
-  M_AMDFAM10H_ISTANBUL,
-  M_AMDFAM15H_BDVER1,
-  M_AMDFAM15H_BDVER2,
-  M_AMDFAM15H_BDVER3,
-  M_AMDFAM15H_BDVER4,
-  M_AMDFAM17H_ZNVER1,
-  M_INTEL_COREI7_IVYBRIDGE,
-  M_INTEL_COREI7_HASWELL,
-  M_INTEL_COREI7_BROADWELL,
-  M_INTEL_COREI7_SKYLAKE,
-  M_INTEL_COREI7_SKYLAKE_AVX512,
-  M_INTEL_COREI7_CANNONLAKE,
-  M_INTEL_COREI7_ICELAKE_CLIENT,
-  M_INTEL_COREI7_ICELAKE_SERVER,
-  M_AMDFAM17H_ZNVER2,
-  M_INTEL_COREI7_CASCADELAKE,
-  M_INTEL_COREI7_TIGERLAKE,
-  M_INTEL_COREI7_COOPERLAKE
-};
-
-struct _arch_names_table
-{
-  const char *const name;
-  const enum processor_model model;
-};
-
-static const _arch_names_table arch_names_table[] =
-{
-  {"amd", M_AMD},
-  {"intel", M_INTEL},
-  {"atom", M_INTEL_BONNELL},
-  {"slm", M_INTEL_SILVERMONT},
-  {"core2", M_INTEL_CORE2},
-  {"corei7", M_INTEL_COREI7},
-  {"nehalem", M_INTEL_COREI7_NEHALEM},
-  {"westmere", M_INTEL_COREI7_WESTMERE},
-  {"sandybridge", M_INTEL_COREI7_SANDYBRIDGE},
-  {"ivybridge", M_INTEL_COREI7_IVYBRIDGE},
-  {"haswell", M_INTEL_COREI7_HASWELL},
-  {"broadwell", M_INTEL_COREI7_BROADWELL},
-  {"skylake", M_INTEL_COREI7_SKYLAKE},
-  {"skylake-avx512", M_INTEL_COREI7_SKYLAKE_AVX512},
-  {"cannonlake", M_INTEL_COREI7_CANNONLAKE},
-  {"icelake-client", M_INTEL_COREI7_ICELAKE_CLIENT},
-  {"icelake-server", M_INTEL_COREI7_ICELAKE_SERVER},
-  {"cascadelake", M_INTEL_COREI7_CASCADELAKE},
-  {"tigerlake", M_INTEL_COREI7_TIGERLAKE},
-  {"cooperlake", M_INTEL_COREI7_COOPERLAKE},
-  {"bonnell", M_INTEL_BONNELL},
-  {"silvermont", M_INTEL_SILVERMONT},
-  {"goldmont", M_INTEL_GOLDMONT},
-  {"goldmont-plus", M_INTEL_GOLDMONT_PLUS},
-  {"tremont", M_INTEL_TREMONT},
-  {"knl", M_INTEL_KNL},
-  {"knm", M_INTEL_KNM},
-  {"amdfam10h", M_AMDFAM10H},
-  {"barcelona", M_AMDFAM10H_BARCELONA},
-  {"shanghai", M_AMDFAM10H_SHANGHAI},
-  {"istanbul", M_AMDFAM10H_ISTANBUL},
-  {"btver1", M_AMD_BTVER1},
-  {"amdfam15h", M_AMDFAM15H},
-  {"bdver1", M_AMDFAM15H_BDVER1},
-  {"bdver2", M_AMDFAM15H_BDVER2},
-  {"bdver3", M_AMDFAM15H_BDVER3},
-  {"bdver4", M_AMDFAM15H_BDVER4},
-  {"btver2", M_AMD_BTVER2},
-  {"amdfam17h", M_AMDFAM17H},
-  {"znver1", M_AMDFAM17H_ZNVER1},
-  {"znver2", M_AMDFAM17H_ZNVER2},
-};
-
-/* These are the target attribute strings for which a dispatcher is
-   available, from fold_builtin_cpu.  */
-struct _isa_names_table
-{
-  const char *const name;
-  const enum processor_features feature;
-  const enum feature_priority priority;
-};
-
-static const _isa_names_table isa_names_table[] =
-{
-  {"cmov",    F_CMOV,	P_ZERO},
-  {"mmx",     F_MMX,	P_MMX},
-  {"popcnt",  F_POPCNT,	P_POPCNT},
-  {"sse",     F_SSE,	P_SSE},
-  {"sse2",    F_SSE2,	P_SSE2},
-  {"sse3",    F_SSE3,	P_SSE3},
-  {"ssse3",   F_SSSE3,	P_SSSE3},
-  {"sse4a",   F_SSE4_A,	P_SSE4_A},
-  {"sse4.1",  F_SSE4_1,	P_SSE4_1},
-  {"sse4.2",  F_SSE4_2,	P_SSE4_2},
-  {"avx",     F_AVX,	P_AVX},
-  {"fma4",    F_FMA4,	P_FMA4},
-  {"xop",     F_XOP,	P_XOP},
-  {"fma",     F_FMA,	P_FMA},
-  {"avx2",    F_AVX2,	P_AVX2},
-  {"avx512f", F_AVX512F, P_AVX512F},
-  {"bmi",     F_BMI,	P_BMI},
-  {"bmi2",    F_BMI2,	P_BMI2},
-  {"aes",     F_AES,	P_AES},
-  {"pclmul",  F_PCLMUL,	P_PCLMUL},
-  {"avx512vl",F_AVX512VL, P_ZERO},
-  {"avx512bw",F_AVX512BW, P_ZERO},
-  {"avx512dq",F_AVX512DQ, P_ZERO},
-  {"avx512cd",F_AVX512CD, P_ZERO},
-  {"avx512er",F_AVX512ER, P_ZERO},
-  {"avx512pf",F_AVX512PF, P_ZERO},
-  {"avx512vbmi",F_AVX512VBMI, P_ZERO},
-  {"avx512ifma",F_AVX512IFMA, P_ZERO},
-  {"avx5124vnniw",F_AVX5124VNNIW, P_ZERO},
-  {"avx5124fmaps",F_AVX5124FMAPS, P_ZERO},
-  {"avx512vpopcntdq",F_AVX512VPOPCNTDQ,	P_ZERO},
-  {"avx512vbmi2", F_AVX512VBMI2, P_ZERO},
-  {"gfni",	F_GFNI,	P_ZERO},
-  {"vpclmulqdq", F_VPCLMULQDQ, P_ZERO},
-  {"avx512vnni", F_AVX512VNNI, P_ZERO},
-  {"avx512bitalg", F_AVX512BITALG, P_ZERO},
-  {"avx512bf16", F_AVX512BF16, P_ZERO},
-  {"avx512vp2intersect",F_AVX512VP2INTERSECT, P_ZERO}
-};
-
 /* This parses the attribute arguments to target in DECL and determines
    the right builtin to use to match the platform specification.
    It returns the priority value for this version decl.  If PREDICATE_LIST
@@ -2084,7 +1887,7 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
   char *tok_str = NULL;
   char *token;
 
-  enum feature_priority priority = P_ZERO;
+  enum feature_priority priority = P_NONE;
 
   static unsigned int NUM_FEATURES
     = sizeof (isa_names_table) / sizeof (_isa_names_table);
@@ -2113,7 +1916,8 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
      before the ssse3 version. */
   if (strstr (attrs_str, "arch=") != NULL)
     {
-      cl_target_option_save (&cur_target, &global_options);
+      cl_target_option_save (&cur_target, &global_options,
+			     &global_options_set);
       target_node
 	= ix86_valid_target_attribute_tree (decl, attrs, &global_options,
 					    &global_options_set, 0);
@@ -2123,144 +1927,83 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
 	return 0;
       new_target = TREE_TARGET_OPTION (target_node);
       gcc_assert (new_target);
-      
-      if (new_target->arch_specified && new_target->arch > 0)
+      enum ix86_builtins builtin_fn = IX86_BUILTIN_CPU_IS;
+
+      /* Special case x86-64 micro-level architectures.  */
+      const char *arch_name = attrs_str + strlen ("arch=");
+      if (startswith (arch_name, "x86-64"))
 	{
-	  switch (new_target->arch)
+	  arg_str = arch_name;
+	  builtin_fn = IX86_BUILTIN_CPU_SUPPORTS;
+	  if (strcmp (arch_name, "x86-64") == 0)
+	    priority = P_X86_64_BASELINE;
+	  else if (strcmp (arch_name, "x86-64-v2") == 0)
+	    priority = P_X86_64_V2;
+	  else if (strcmp (arch_name, "x86-64-v3") == 0)
+	    priority = P_X86_64_V3;
+	  else if (strcmp (arch_name, "x86-64-v4") == 0)
+	    priority = P_X86_64_V4;
+	}
+      else if (new_target->arch_specified && new_target->arch > 0)
+	for (i = 0; i < pta_size; i++)
+	  if (processor_alias_table[i].processor == new_target->arch)
 	    {
-	    case PROCESSOR_CORE2:
-	      arg_str = "core2";
-	      priority = P_PROC_SSSE3;
-	      break;
-	    case PROCESSOR_NEHALEM:
-	      if (new_target->x_ix86_isa_flags & OPTION_MASK_ISA_PCLMUL)
+	      const pta *arch_info = &processor_alias_table[i];
+	      switch (arch_info->priority)
 		{
-		  arg_str = "westmere";
-		  priority = P_PCLMUL;
+		default:
+		  arg_str = arch_info->name;
+		  priority = arch_info->priority;
+		  break;
+		case P_PROC_DYNAMIC:
+		  switch (new_target->arch)
+		    {
+		    case PROCESSOR_NEHALEM:
+		      if (TARGET_PCLMUL_P (new_target->x_ix86_isa_flags))
+			{
+			  arg_str = "westmere";
+			  priority = P_PCLMUL;
+			}
+		      else
+			{
+			  /* We translate "arch=corei7" and "arch=nehalem"
+			     to "corei7" so that it will be mapped to
+			     M_INTEL_COREI7 as cpu type to cover all
+			     M_INTEL_COREI7_XXXs.  */
+			  arg_str = "corei7";
+			  priority = P_PROC_SSE4_2;
+			}
+		      break;
+		    case PROCESSOR_SANDYBRIDGE:
+		      if (TARGET_F16C_P (new_target->x_ix86_isa_flags))
+			arg_str = "ivybridge";
+		      else
+			arg_str = "sandybridge";
+		      priority = P_PROC_AVX;
+		      break;
+		    case PROCESSOR_HASWELL:
+		      if (TARGET_ADX_P (new_target->x_ix86_isa_flags))
+			arg_str = "broadwell";
+		      else
+			arg_str = "haswell";
+		      priority = P_PROC_AVX2;
+		      break;
+		    case PROCESSOR_AMDFAM10:
+		      arg_str = "amdfam10h";
+		      priority = P_PROC_SSE4_A;
+		      break;
+		    default:
+		      gcc_unreachable ();
+		    }
+		  break;
+		case P_NONE:
+		  break;
 		}
-	      else
-		{
-		  /* We translate "arch=corei7" and "arch=nehalem" to
-		     "corei7" so that it will be mapped to M_INTEL_COREI7
-		     as cpu type to cover all M_INTEL_COREI7_XXXs.  */
-		  arg_str = "corei7";
-		  priority = P_PROC_SSE4_2;
-		}
-	      break;
-	    case PROCESSOR_SANDYBRIDGE:
-	      if (new_target->x_ix86_isa_flags & OPTION_MASK_ISA_F16C)
-		arg_str = "ivybridge";
-	      else
-		arg_str = "sandybridge";
-	      priority = P_PROC_AVX;
-	      break;
-	    case PROCESSOR_HASWELL:
-	      if (new_target->x_ix86_isa_flags & OPTION_MASK_ISA_ADX)
-		arg_str = "broadwell";
-	      else
-		arg_str = "haswell";
-	      priority = P_PROC_AVX2;
-	      break;
-	    case PROCESSOR_SKYLAKE:
-	      arg_str = "skylake";
-	      priority = P_PROC_AVX2;
-	      break;
-	    case PROCESSOR_SKYLAKE_AVX512:
-	      arg_str = "skylake-avx512";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_CANNONLAKE:
-	      arg_str = "cannonlake";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_ICELAKE_CLIENT:
-	      arg_str = "icelake-client";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_ICELAKE_SERVER:
-	      arg_str = "icelake-server";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_CASCADELAKE:
-	      arg_str = "cascadelake";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_TIGERLAKE:
-	      arg_str = "tigerlake";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_COOPERLAKE:
-	      arg_str = "cooperlake";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_BONNELL:
-	      arg_str = "bonnell";
-	      priority = P_PROC_SSSE3;
-	      break;
-	    case PROCESSOR_KNL:
-	      arg_str = "knl";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_KNM:
-	      arg_str = "knm";
-	      priority = P_PROC_AVX512F;
-	      break;
-	    case PROCESSOR_SILVERMONT:
-	      arg_str = "silvermont";
-	      priority = P_PROC_SSE4_2;
-	      break;
-	    case PROCESSOR_GOLDMONT:
-	      arg_str = "goldmont";
-	      priority = P_PROC_SSE4_2;
-	      break;
-	    case PROCESSOR_GOLDMONT_PLUS:
-	      arg_str = "goldmont-plus";
-	      priority = P_PROC_SSE4_2;
-	      break;
-	    case PROCESSOR_TREMONT:
-	      arg_str = "tremont";
-	      priority = P_PROC_SSE4_2;
-	      break;
-	    case PROCESSOR_AMDFAM10:
-	      arg_str = "amdfam10h";
-	      priority = P_PROC_SSE4_A;
-	      break;
-	    case PROCESSOR_BTVER1:
-	      arg_str = "btver1";
-	      priority = P_PROC_SSE4_A;
-	      break;
-	    case PROCESSOR_BTVER2:
-	      arg_str = "btver2";
-	      priority = P_PROC_BMI;
-	      break;
-	    case PROCESSOR_BDVER1:
-	      arg_str = "bdver1";
-	      priority = P_PROC_XOP;
-	      break;
-	    case PROCESSOR_BDVER2:
-	      arg_str = "bdver2";
-	      priority = P_PROC_FMA;
-	      break;
-	    case PROCESSOR_BDVER3:
-	      arg_str = "bdver3";
-	      priority = P_PROC_FMA;
-	      break;
-	    case PROCESSOR_BDVER4:
-	      arg_str = "bdver4";
-	      priority = P_PROC_AVX2;
-	      break;
-	    case PROCESSOR_ZNVER1:
-	      arg_str = "znver1";
-	      priority = P_PROC_AVX2;
-	      break;
-	    case PROCESSOR_ZNVER2:
-	      arg_str = "znver2";
-	      priority = P_PROC_AVX2;
 	      break;
 	    }
-	}
 
-      cl_target_option_restore (&global_options, &cur_target);
+      cl_target_option_restore (&global_options, &global_options_set,
+				&cur_target);
 	
       if (predicate_list && arg_str == NULL)
 	{
@@ -2271,7 +2014,7 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
     
       if (predicate_list)
 	{
-          predicate_decl = ix86_builtins [(int) IX86_BUILTIN_CPU_IS];
+	  predicate_decl = ix86_builtins [(int) builtin_fn];
           /* For a C string literal the length includes the trailing NULL.  */
           predicate_arg = build_string_literal (strlen (arg_str) + 1, arg_str);
           predicate_chain = tree_cons (predicate_decl, predicate_arg,
@@ -2288,7 +2031,7 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
   while (token != NULL)
     {
       /* Do not process "arch="  */
-      if (strncmp (token, "arch=", 5) == 0)
+      if (startswith (token, "arch="))
 	{
 	  token = strtok (NULL, ",");
 	  continue;
@@ -2312,7 +2055,7 @@ get_builtin_code_for_version (tree decl, tree *predicate_list)
 	      break;
 	    }
 	}
-      if (predicate_list && priority == P_ZERO)
+      if (predicate_list && priority == P_NONE)
 	{
 	  error_at (DECL_SOURCE_LOCATION (decl),
 		    "ISA %qs is not supported in %<target%> attribute, "
@@ -2399,6 +2142,11 @@ make_var_decl (tree type, const char *name)
   return new_decl;
 }
 
+static GTY(()) tree ix86_cpu_model_type_node;
+static GTY(()) tree ix86_cpu_model_var;
+static GTY(()) tree ix86_cpu_features2_type_node;
+static GTY(()) tree ix86_cpu_features2_var;
+
 /* FNDECL is a __builtin_cpu_is or a __builtin_cpu_supports call that is folded
    into an integer defined in libgcc/config/i386/cpuinfo.c */
 
@@ -2410,12 +2158,16 @@ fold_builtin_cpu (tree fndecl, tree *args)
     = (enum ix86_builtins) DECL_MD_FUNCTION_CODE (fndecl);
   tree param_string_cst = NULL;
 
-  tree __processor_model_type = build_processor_model_struct ();
-  tree __cpu_model_var = make_var_decl (__processor_model_type,
-					"__cpu_model");
-
-
-  varpool_node::add (__cpu_model_var);
+  if (ix86_cpu_model_var == nullptr)
+    {
+      /* Build a single __cpu_model variable for all references to
+	 __cpu_model so that GIMPLE level optimizers can CSE the loads
+	 of __cpu_model and optimize bit-operations properly.  */
+      ix86_cpu_model_type_node = build_processor_model_struct ();
+      ix86_cpu_model_var = make_var_decl (ix86_cpu_model_type_node,
+					  "__cpu_model");
+      varpool_node::add (ix86_cpu_model_var);
+    }
 
   gcc_assert ((args != NULL) && (*args != NULL));
 
@@ -2442,23 +2194,22 @@ fold_builtin_cpu (tree fndecl, tree *args)
       tree final;
 
       unsigned int field_val = 0;
-      unsigned int NUM_ARCH_NAMES
-	= sizeof (arch_names_table) / sizeof (struct _arch_names_table);
 
-      for (i = 0; i < NUM_ARCH_NAMES; i++)
-	if (strcmp (arch_names_table[i].name,
-	    TREE_STRING_POINTER (param_string_cst)) == 0)
+      for (i = 0; i < num_arch_names; i++)
+	if (processor_alias_table[i].model != 0
+	    && strcmp (processor_alias_table[i].name,
+		       TREE_STRING_POINTER (param_string_cst)) == 0)
 	  break;
 
-      if (i == NUM_ARCH_NAMES)
+      if (i == num_arch_names)
 	{
 	  error ("parameter to builtin not valid: %s",
 	         TREE_STRING_POINTER (param_string_cst));
 	  return integer_zero_node;
 	}
 
-      field = TYPE_FIELDS (__processor_model_type);
-      field_val = arch_names_table[i].model;
+      field = TYPE_FIELDS (ix86_cpu_model_type_node);
+      field_val = processor_alias_table[i].model;
 
       /* CPU types are stored in the next field.  */
       if (field_val > M_CPU_TYPE_START
@@ -2476,7 +2227,7 @@ fold_builtin_cpu (tree fndecl, tree *args)
 	}
 
       /* Get the appropriate field in __cpu_model.  */
-      ref = build3 (COMPONENT_REF, TREE_TYPE (field), __cpu_model_var,
+      ref = build3 (COMPONENT_REF, TREE_TYPE (field), ix86_cpu_model_var,
 		    field, NULL_TREE);
 
       /* Check the value.  */
@@ -2509,25 +2260,47 @@ fold_builtin_cpu (tree fndecl, tree *args)
 
       if (isa_names_table[i].feature >= 32)
 	{
-	  tree __cpu_features2_var = make_var_decl (unsigned_type_node,
-						    "__cpu_features2");
+	  if (ix86_cpu_features2_var == nullptr)
+	    {
+	      /* Build a single __cpu_features2 variable for all
+		 references to __cpu_features2 so that GIMPLE level
+		 optimizers can CSE the loads of __cpu_features2 and
+		 optimize bit-operations properly.  */
+	      tree index_type
+		= build_index_type (size_int (SIZE_OF_CPU_FEATURES));
+	      ix86_cpu_features2_type_node
+		= build_array_type (unsigned_type_node, index_type);
+	      ix86_cpu_features2_var
+		= make_var_decl (ix86_cpu_features2_type_node,
+				 "__cpu_features2");
+	      varpool_node::add (ix86_cpu_features2_var);
+	    }
 
-	  varpool_node::add (__cpu_features2_var);
-	  field_val = (1U << (isa_names_table[i].feature - 32));
-	  /* Return __cpu_features2 & field_val  */
-	  final = build2 (BIT_AND_EXPR, unsigned_type_node,
-			  __cpu_features2_var,
-			  build_int_cstu (unsigned_type_node, field_val));
-	  return build1 (CONVERT_EXPR, integer_type_node, final);
+	  for (unsigned int j = 0; j < SIZE_OF_CPU_FEATURES; j++)
+	    if (isa_names_table[i].feature < (32 + 32 + j * 32))
+	      {
+		field_val = (1U << (isa_names_table[i].feature
+				    - (32 + j * 32)));
+		tree index = size_int (j);
+		array_elt = build4 (ARRAY_REF, unsigned_type_node,
+				    ix86_cpu_features2_var,
+				    index, NULL_TREE, NULL_TREE);
+		/* Return __cpu_features2[index] & field_val  */
+		final = build2 (BIT_AND_EXPR, unsigned_type_node,
+				array_elt,
+				build_int_cstu (unsigned_type_node,
+						field_val));
+		return build1 (CONVERT_EXPR, integer_type_node, final);
+	      }
 	}
 
-      field = TYPE_FIELDS (__processor_model_type);
+      field = TYPE_FIELDS (ix86_cpu_model_type_node);
       /* Get the last field, which is __cpu_features.  */
       while (DECL_CHAIN (field))
         field = DECL_CHAIN (field);
 
       /* Get the appropriate field: __cpu_model.__cpu_features  */
-      ref = build3 (COMPONENT_REF, TREE_TYPE (field), __cpu_model_var,
+      ref = build3 (COMPONENT_REF, TREE_TYPE (field), ix86_cpu_model_var,
 		    field, NULL_TREE);
 
       /* Access the 0th element of __cpu_features array.  */

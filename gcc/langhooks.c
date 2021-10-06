@@ -1,5 +1,5 @@
 /* Default language-specific hooks.
-   Copyright (C) 2001-2020 Free Software Foundation, Inc.
+   Copyright (C) 2001-2021 Free Software Foundation, Inc.
    Contributed by Alexandre Oliva  <aoliva@redhat.com>
 
 This file is part of GCC.
@@ -36,6 +36,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "output.h"
 #include "timevar.h"
 #include "stor-layout.h"
+#include "cgraph.h"
+#include "debug.h"
 
 /* Do nothing; in many cases the default hook.  */
 
@@ -483,7 +485,7 @@ lhd_make_node (enum tree_code code)
    might be reusable elsewhere.  */
 tree
 lhd_simulate_enum_decl (location_t loc, const char *name,
-			vec<string_int_pair> values)
+			vec<string_int_pair> *values_ptr)
 {
   tree enumtype = lang_hooks.types.make_type (ENUMERAL_TYPE);
   tree enumdecl = build_decl (loc, TYPE_DECL, get_identifier (name), enumtype);
@@ -491,6 +493,7 @@ lhd_simulate_enum_decl (location_t loc, const char *name,
 
   tree value_chain = NULL_TREE;
   string_int_pair *value;
+  vec<string_int_pair> values = *values_ptr;
   unsigned int i;
   FOR_EACH_VEC_ELT (values, i, value)
     {
@@ -579,11 +582,22 @@ lhd_expr_to_decl (tree expr, bool *tc ATTRIBUTE_UNUSED, bool *se ATTRIBUTE_UNUSE
    predetermined, OMP_CLAUSE_DEFAULT_UNSPECIFIED otherwise.  */
 
 enum omp_clause_default_kind
-lhd_omp_predetermined_sharing (tree decl ATTRIBUTE_UNUSED)
+lhd_omp_predetermined_sharing (tree decl)
 {
   if (DECL_ARTIFICIAL (decl))
     return OMP_CLAUSE_DEFAULT_SHARED;
   return OMP_CLAUSE_DEFAULT_UNSPECIFIED;
+}
+
+/* Return sharing kind if OpenMP mapping attribute of DECL is
+   predetermined, OMP_CLAUSE_DEFAULTMAP_CATEGORY_UNSPECIFIED otherwise.  */
+
+enum omp_clause_defaultmap_kind
+lhd_omp_predetermined_mapping (tree decl)
+{
+  if (DECL_ARTIFICIAL (decl))
+    return OMP_CLAUSE_DEFAULTMAP_TO;
+  return OMP_CLAUSE_DEFAULTMAP_CATEGORY_UNSPECIFIED;
 }
 
 /* Generate code to copy SRC to DST.  */
@@ -597,15 +611,16 @@ lhd_omp_assignment (tree clause ATTRIBUTE_UNUSED, tree dst, tree src)
 /* Finalize clause C.  */
 
 void
-lhd_omp_finish_clause (tree, gimple_seq *)
+lhd_omp_finish_clause (tree, gimple_seq *, bool)
 {
 }
 
 /* Return true if DECL is a scalar variable (for the purpose of
-   implicit firstprivatization).  */
+   implicit firstprivatization & mapping). Only if alloc_ptr_ok
+   are allocatables and pointers accepted. */
 
 bool
-lhd_omp_scalar_p (tree decl)
+lhd_omp_scalar_p (tree decl, bool ptr_ok)
 {
   tree type = TREE_TYPE (decl);
   if (TREE_CODE (type) == REFERENCE_TYPE)
@@ -614,9 +629,25 @@ lhd_omp_scalar_p (tree decl)
     type = TREE_TYPE (type);
   if (INTEGRAL_TYPE_P (type)
       || SCALAR_FLOAT_TYPE_P (type)
-      || TREE_CODE (type) == POINTER_TYPE)
+      || (ptr_ok && TREE_CODE (type) == POINTER_TYPE))
     return true;
   return false;
+}
+
+/* Return static initializer for DECL.  */
+
+tree *
+lhd_omp_get_decl_init (tree decl)
+{
+  return &DECL_INITIAL (decl);
+}
+
+/* Free any extra memory used to hold initializer information for
+   variable declarations.  */
+
+void
+lhd_omp_finish_decl_inits (void)
+{
 }
 
 /* Register language specific type size variables as potentially OpenMP
@@ -777,7 +808,7 @@ lhd_begin_section (const char *name)
     saved_section = text_section;
 
   /* Create a new section and switch to it.  */
-  section = get_section (name, SECTION_DEBUG | SECTION_EXCLUDE, NULL);
+  section = get_section (name, SECTION_DEBUG | SECTION_EXCLUDE, NULL, true);
   switch_to_section (section);
 }
 
@@ -855,12 +886,24 @@ lhd_unit_size_without_reusable_padding (tree t)
   return TYPE_SIZE_UNIT (t);
 }
 
+/* Default implementation for the finalize_early_debug hook.  */
+
+void
+lhd_finalize_early_debug (void)
+{
+  /* Emit early debug for reachable functions, and by consequence,
+     locally scoped symbols.  */
+  struct cgraph_node *cnode;
+  FOR_EACH_FUNCTION_WITH_GIMPLE_BODY (cnode)
+    (*debug_hooks->early_global_decl) (cnode->decl);
+}
+
 /* Returns true if the current lang_hooks represents the GNU C frontend.  */
 
 bool
 lang_GNU_C (void)
 {
-  return (strncmp (lang_hooks.name, "GNU C", 5) == 0
+  return (startswith (lang_hooks.name, "GNU C")
 	  && (lang_hooks.name[5] == '\0' || ISDIGIT (lang_hooks.name[5])));
 }
 
@@ -869,7 +912,7 @@ lang_GNU_C (void)
 bool
 lang_GNU_CXX (void)
 {
-  return strncmp (lang_hooks.name, "GNU C++", 7) == 0;
+  return startswith (lang_hooks.name, "GNU C++");
 }
 
 /* Returns true if the current lang_hooks represents the GNU Fortran frontend.  */
@@ -877,7 +920,7 @@ lang_GNU_CXX (void)
 bool
 lang_GNU_Fortran (void)
 {
-  return strncmp (lang_hooks.name, "GNU Fortran", 11) == 0;
+  return startswith (lang_hooks.name, "GNU Fortran");
 }
 
 /* Returns true if the current lang_hooks represents the GNU Objective-C
@@ -886,5 +929,5 @@ lang_GNU_Fortran (void)
 bool
 lang_GNU_OBJC (void)
 {
-  return strncmp (lang_hooks.name, "GNU Objective-C", 15) == 0;
+  return startswith (lang_hooks.name, "GNU Objective-C");
 }

@@ -74,6 +74,9 @@
 #undef create_code
 #undef verify_code
 
+/* test-builtin-unreachable.c: We don't add this one, since it touches
+   the optimization level of the context as a whole.  */
+
 /* test-calling-external-function.c */
 #define create_code create_code_calling_external_function
 #define verify_code verify_code_calling_external_function
@@ -92,6 +95,13 @@
 #define create_code create_code_calling_internal_function
 #define verify_code verify_code_calling_internal_function
 #include "test-returning-function-ptr.c"
+#undef create_code
+#undef verify_code
+
+/* test-cast.c */
+#define create_code create_code_cast
+#define verify_code verify_code_cast
+#include "test-cast.c"
 #undef create_code
 #undef verify_code
 
@@ -171,6 +181,13 @@
 #undef create_code
 #undef verify_code
 
+/* test-global-set-initializer.c */
+#define create_code create_code_global_set_initializer
+#define verify_code verify_code_global_set_initializer
+#include "test-global-set-initializer.c"
+#undef create_code
+#undef verify_code
+
 /* test-hello-world.c */
 #define create_code create_code_hello_world
 #define verify_code verify_code_hello_world
@@ -231,6 +248,13 @@
 #define create_code create_code_pr95306_builtin_types
 #define verify_code verify_code_pr95306_builtin_types
 #include "test-pr95306-builtin-types.c"
+#undef create_code
+#undef verify_code
+
+/* test-pr95314-rvalue-reuse.c.  */
+#define create_code create_code_pr95314_rvalue_reuse
+#define verify_code verify_code_pr95314_rvalue_reuse
+#include "test-pr95314-rvalue-reuse.c"
 #undef create_code
 #undef verify_code
 
@@ -344,6 +368,9 @@ const struct testcase testcases[] = {
   {"calling_internal_function",
    create_code_calling_internal_function,
    verify_code_calling_internal_function},
+  {"cast",
+   create_code_cast,
+   verify_code_cast},
   {"compound_assignment",
    create_code_compound_assignment,
    verify_code_compound_assignment},
@@ -401,6 +428,9 @@ const struct testcase testcases[] = {
   {"pr95306_builtin_types",
    create_code_pr95306_builtin_types,
    verify_code_pr95306_builtin_types},
+  {"pr95314_rvalue_reuse",
+   create_code_pr95314_rvalue_reuse,
+   verify_code_pr95314_rvalue_reuse},
   {"reading_struct ",
    create_code_reading_struct ,
    verify_code_reading_struct },

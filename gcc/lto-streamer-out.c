@@ -1,6 +1,6 @@
 /* Write the GIMPLE representation to a file stream.
 
-   Copyright (C) 2009-2020 Free Software Foundation, Inc.
+   Copyright (C) 2009-2021 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
    Re-implemented by Diego Novillo <dnovillo@google.com>
 
@@ -47,6 +47,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "file-prefix-map.h" /* remap_debug_filename()  */
 #include "output.h"
 #include "ipa-utils.h"
+#include "toplev.h"
 
 
 static void lto_write_tree (struct output_block*, tree, bool);
@@ -60,6 +61,12 @@ clear_line_info (struct output_block *ob)
   ob->current_line = 0;
   ob->current_col = 0;
   ob->current_sysp = false;
+  ob->reset_locus = true;
+  ob->emit_pwd = true;
+  /* Initialize to something that will never appear as block,
+     so that the first location with block in a function etc.
+     always streams a change_block bit and the first block.  */
+  ob->current_block = void_node;
 }
 
 
@@ -118,15 +125,6 @@ destroy_output_block (struct output_block *ob)
   free (ob);
 }
 
-
-/* Look up NODE in the type table and write the index for it to OB.  */
-
-static void
-output_type_ref (struct output_block *ob, tree node)
-{
-  streamer_write_record_start (ob, LTO_type_ref);
-  lto_output_type_ref_index (ob->decl_state, ob->main_stream, node);
-}
 
 /* Wrapper around variably_modified_type_p avoiding type modification
    during WPA streaming.  */
@@ -187,40 +185,128 @@ tree_is_indexable (tree t)
    After outputting bitpack, lto_output_location_data has
    to be done to output actual data.  */
 
+static void
+lto_output_location_1 (struct output_block *ob, struct bitpack_d *bp,
+		       location_t orig_loc, bool block_p)
+{
+  location_t loc = LOCATION_LOCUS (orig_loc);
+
+  if (loc >= RESERVED_LOCATION_COUNT)
+    {
+      expanded_location xloc = expand_location (loc);
+
+      if (ob->reset_locus)
+	{
+	  if (xloc.file == NULL)
+	    ob->current_file = "";
+	  if (xloc.line == 0)
+	    ob->current_line = 1;
+	  if (xloc.column == 0)
+	    ob->current_col = 1;
+	  ob->reset_locus = false;
+	}
+
+      /* As RESERVED_LOCATION_COUNT is 2, we can use the spare value of
+	 3 without wasting additional bits to signalize file change.
+	 If RESERVED_LOCATION_COUNT changes, reconsider this.  */
+      gcc_checking_assert (RESERVED_LOCATION_COUNT == 2);
+      bp_pack_int_in_range (bp, 0, RESERVED_LOCATION_COUNT + 1,
+			    RESERVED_LOCATION_COUNT
+			    + (ob->current_file != xloc.file));
+
+      bp_pack_value (bp, ob->current_line != xloc.line, 1);
+      bp_pack_value (bp, ob->current_col != xloc.column, 1);
+
+      if (ob->current_file != xloc.file)
+	{
+	  bool stream_pwd = false;
+	  const char *remapped = remap_debug_filename (xloc.file);
+	  if (ob->emit_pwd && remapped && !IS_ABSOLUTE_PATH (remapped))
+	    {
+	      stream_pwd = true;
+	      ob->emit_pwd = false;
+	    }
+	  bp_pack_value (bp, stream_pwd, 1);
+	  if (stream_pwd)
+	    bp_pack_string (ob, bp, get_src_pwd (), true);
+	  bp_pack_string (ob, bp, remapped, true);
+	  bp_pack_value (bp, xloc.sysp, 1);
+	}
+      ob->current_file = xloc.file;
+      ob->current_sysp = xloc.sysp;
+
+      if (ob->current_line != xloc.line)
+	bp_pack_var_len_unsigned (bp, xloc.line);
+      ob->current_line = xloc.line;
+
+      if (ob->current_col != xloc.column)
+	bp_pack_var_len_unsigned (bp, xloc.column);
+      ob->current_col = xloc.column;
+    }
+  else
+    bp_pack_int_in_range (bp, 0, RESERVED_LOCATION_COUNT + 1, loc);
+
+  if (block_p)
+    {
+      tree block = LOCATION_BLOCK (orig_loc);
+      bp_pack_value (bp, ob->current_block != block, 1);
+      streamer_write_bitpack (bp);
+      if (ob->current_block != block)
+	lto_output_tree (ob, block, true, true);
+      ob->current_block = block;
+    }
+}
+
+/* Output info about new location into bitpack BP.
+   After outputting bitpack, lto_output_location_data has
+   to be done to output actual data.  */
+
 void
 lto_output_location (struct output_block *ob, struct bitpack_d *bp,
 		     location_t loc)
 {
-  expanded_location xloc;
+  lto_output_location_1 (ob, bp, loc, false);
+}
 
-  loc = LOCATION_LOCUS (loc);
-  bp_pack_int_in_range (bp, 0, RESERVED_LOCATION_COUNT,
-		        loc < RESERVED_LOCATION_COUNT
-			? loc : RESERVED_LOCATION_COUNT);
-  if (loc < RESERVED_LOCATION_COUNT)
-    return;
+/* Output info about new location into bitpack BP.
+   After outputting bitpack, lto_output_location_data has
+   to be done to output actual data.  Like lto_output_location, but
+   additionally output LOCATION_BLOCK info too and write the BP bitpack.  */
 
-  xloc = expand_location (loc);
+void
+lto_output_location_and_block (struct output_block *ob, struct bitpack_d *bp,
+			       location_t loc)
+{
+  lto_output_location_1 (ob, bp, loc, true);
+}
 
-  bp_pack_value (bp, ob->current_file != xloc.file, 1);
-  bp_pack_value (bp, ob->current_line != xloc.line, 1);
-  bp_pack_value (bp, ob->current_col != xloc.column, 1);
 
-  if (ob->current_file != xloc.file)
+/* Lookup NAME in ENCODER.  If NAME is not found, create a new entry in
+   ENCODER for NAME with the next available index of ENCODER,  then
+   print the index to OBS.
+   Return the index.  */
+
+
+static unsigned
+lto_get_index (struct lto_tree_ref_encoder *encoder, tree t)
+{
+  bool existed_p;
+
+  unsigned int &index
+    = encoder->tree_hash_table->get_or_insert (t, &existed_p);
+  if (!existed_p)
     {
-      bp_pack_string (ob, bp, remap_debug_filename (xloc.file), true);
-      bp_pack_value (bp, xloc.sysp, 1);
+      index = encoder->trees.length ();
+      if (streamer_dump_file)
+	{
+	  print_node_brief (streamer_dump_file, "     Encoding indexable ",
+			    t, 4);
+	  fprintf (streamer_dump_file, "  as %i \n", index);
+	}
+      encoder->trees.safe_push (t);
     }
-  ob->current_file = xloc.file;
-  ob->current_sysp = xloc.sysp;
 
-  if (ob->current_line != xloc.line)
-    bp_pack_var_len_unsigned (bp, xloc.line);
-  ob->current_line = xloc.line;
-
-  if (ob->current_col != xloc.column)
-    bp_pack_var_len_unsigned (bp, xloc.column);
-  ob->current_col = xloc.column;
+  return index;
 }
 
 
@@ -229,91 +315,47 @@ lto_output_location (struct output_block *ob, struct bitpack_d *bp,
    EXPR to OB.  */
 
 static void
-lto_output_tree_ref (struct output_block *ob, tree expr)
+lto_indexable_tree_ref (struct output_block *ob, tree expr,
+			enum LTO_tags *tag, unsigned *index)
 {
-  enum tree_code code;
+  gcc_checking_assert (tree_is_indexable (expr));
 
-  if (TYPE_P (expr))
+  if (TREE_CODE (expr) == SSA_NAME)
     {
-      output_type_ref (ob, expr);
-      return;
+      *tag = LTO_ssa_name_ref;
+      *index = SSA_NAME_VERSION (expr);
     }
-
-  code = TREE_CODE (expr);
-  switch (code)
+  else
     {
-    case SSA_NAME:
-      streamer_write_record_start (ob, LTO_ssa_name_ref);
-      streamer_write_uhwi (ob, SSA_NAME_VERSION (expr));
-      break;
-
-    case FIELD_DECL:
-      streamer_write_record_start (ob, LTO_field_decl_ref);
-      lto_output_field_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case FUNCTION_DECL:
-      streamer_write_record_start (ob, LTO_function_decl_ref);
-      lto_output_fn_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case VAR_DECL:
-    case DEBUG_EXPR_DECL:
-      gcc_assert (decl_function_context (expr) == NULL || TREE_STATIC (expr));
-      /* FALLTHRU */
-    case PARM_DECL:
-      streamer_write_record_start (ob, LTO_global_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case CONST_DECL:
-      streamer_write_record_start (ob, LTO_const_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case IMPORTED_DECL:
-      gcc_assert (decl_function_context (expr) == NULL);
-      streamer_write_record_start (ob, LTO_imported_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case TYPE_DECL:
-      streamer_write_record_start (ob, LTO_type_decl_ref);
-      lto_output_type_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case NAMELIST_DECL:
-      streamer_write_record_start (ob, LTO_namelist_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case NAMESPACE_DECL:
-      streamer_write_record_start (ob, LTO_namespace_decl_ref);
-      lto_output_namespace_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case LABEL_DECL:
-      streamer_write_record_start (ob, LTO_label_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case RESULT_DECL:
-      streamer_write_record_start (ob, LTO_result_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    case TRANSLATION_UNIT_DECL:
-      streamer_write_record_start (ob, LTO_translation_unit_decl_ref);
-      lto_output_var_decl_index (ob->decl_state, ob->main_stream, expr);
-      break;
-
-    default:
-      /* No other node is indexable, so it should have been handled by
-	 lto_output_tree.  */
-      gcc_unreachable ();
+      *tag = LTO_global_stream_ref;
+      *index = lto_get_index (&ob->decl_state->streams[LTO_DECL_STREAM], expr);
     }
 }
 
+
+/* Output a static or extern var DECL to OBS.  */
+
+void
+lto_output_var_decl_ref (struct lto_out_decl_state *decl_state,
+			 struct lto_output_stream * obs, tree decl)
+{
+  gcc_checking_assert (TREE_CODE (decl) == VAR_DECL);
+  streamer_write_uhwi_stream
+     (obs, lto_get_index (&decl_state->streams[LTO_DECL_STREAM],
+			  decl));
+}
+
+
+/* Output a static or extern var DECL to OBS.  */
+
+void
+lto_output_fn_decl_ref (struct lto_out_decl_state *decl_state,
+			struct lto_output_stream * obs, tree decl)
+{
+  gcc_checking_assert (TREE_CODE (decl) == FUNCTION_DECL);
+  streamer_write_uhwi_stream
+     (obs, lto_get_index (&decl_state->streams[LTO_DECL_STREAM], decl));
+}
 
 /* Return true if EXPR is a tree node that can be written to disk.  */
 
@@ -409,6 +451,42 @@ get_symbol_initial_value (lto_symtab_encoder_t encoder, tree expr)
 }
 
 
+/* Output reference to tree T to the stream.
+   Assume that T is already in encoder cache. 
+   This is used to stream tree bodies where we know the DFS walk arranged
+   everything to cache.  Must be matched with stream_read_tree_ref.  */
+
+void
+stream_write_tree_ref (struct output_block *ob, tree t)
+{
+  if (!t)
+    streamer_write_zero (ob);
+  else
+    {
+      unsigned int ix;
+      bool existed_p = streamer_tree_cache_lookup (ob->writer_cache, t, &ix);
+      if (existed_p)
+	streamer_write_hwi (ob, ix + 1);
+      else
+	{
+	  enum LTO_tags tag;
+	  unsigned ix;
+	  int id = 0;
+
+	  lto_indexable_tree_ref (ob, t, &tag, &ix);
+	  if (tag == LTO_ssa_name_ref)
+	    id = 1;
+	  else
+	    gcc_checking_assert (tag == LTO_global_stream_ref);
+	  streamer_write_hwi (ob, -(int)(ix * 2 + id + 1));
+	}
+      if (streamer_debugging)
+	streamer_write_uhwi (ob, TREE_CODE (t));
+    }
+}
+
+
+
 /* Write a physical representation of tree node EXPR to output block
    OB.  If REF_P is true, the leaves of EXPR are emitted as references
    via lto_output_tree_ref.  IX is the index into the streamer cache
@@ -430,7 +508,7 @@ lto_write_tree_1 (struct output_block *ob, tree expr, bool ref_p)
   streamer_write_tree_bitfields (ob, expr);
 
   /* Write all the pointer fields in EXPR.  */
-  streamer_write_tree_body (ob, expr, ref_p);
+  streamer_write_tree_body (ob, expr);
 
   /* Write any LTO-specific data to OB.  */
   if (DECL_P (expr)
@@ -505,7 +583,7 @@ lto_output_tree_1 (struct output_block *ob, tree expr, hashval_t hash,
       /* Shared INTEGER_CST nodes are special because they need their
 	 original type to be materialized by the reader (to implement
 	 TYPE_CACHED_VALUES).  */
-      streamer_write_integer_cst (ob, expr, ref_p);
+      streamer_write_integer_cst (ob, expr);
     }
   else
     {
@@ -988,9 +1066,7 @@ DFS::DFS_write_tree_body (struct output_block *ob,
 
   if (CODE_CONTAINS_STRUCT (code, TS_TYPE_NON_COMMON))
     {
-      if (TREE_CODE (expr) == ENUMERAL_TYPE)
-	DFS_follow_tree_edge (TYPE_VALUES (expr));
-      else if (TREE_CODE (expr) == ARRAY_TYPE)
+      if (TREE_CODE (expr) == ARRAY_TYPE)
 	DFS_follow_tree_edge (TYPE_DOMAIN (expr));
       else if (RECORD_OR_UNION_TYPE_P (expr))
 	for (tree t = TYPE_FIELDS (expr); t; t = TREE_CHAIN (t))
@@ -1195,7 +1271,10 @@ hash_tree (struct streamer_tree_cache_d *cache, hash_map<tree, hashval_t> *map, 
 	  hstate.add_flag (DECL_PACKED (t));
 	  hstate.add_flag (DECL_NONADDRESSABLE_P (t));
 	  hstate.add_flag (DECL_PADDING_P (t));
-	  hstate.add_flag (DECL_FIELD_ABI_IGNORED (t));
+	  if (DECL_BIT_FIELD (t))
+	    hstate.add_flag (DECL_FIELD_CXX_ZERO_WIDTH_BIT_FIELD (t));
+	  else
+	    hstate.add_flag (DECL_FIELD_ABI_IGNORED (t));
 	  hstate.add_int (DECL_OFFSET_ALIGN (t));
 	}
       else if (code == VAR_DECL)
@@ -1401,9 +1480,7 @@ hash_tree (struct streamer_tree_cache_d *cache, hash_map<tree, hashval_t> *map, 
 
   if (CODE_CONTAINS_STRUCT (code, TS_TYPE_NON_COMMON))
     {
-      if (code == ENUMERAL_TYPE)
-	visit (TYPE_VALUES (t));
-      else if (code == ARRAY_TYPE)
+      if (code == ARRAY_TYPE)
 	visit (TYPE_DOMAIN (t));
       else if (RECORD_OR_UNION_TYPE_P (t))
 	for (tree f = TYPE_FIELDS (t); f; f = TREE_CHAIN (f))
@@ -1685,7 +1762,7 @@ DFS::DFS_write_tree (struct output_block *ob, sccs *from_state,
   /* Check if we already streamed EXPR.  */
   if (streamer_tree_cache_lookup (ob->writer_cache, expr, NULL))
     {
-      /* Refernece to a local tree makes entry also local.  We always process
+      /* Reference to a local tree makes entry also local.  We always process
 	 top of stack entry, so set max to number of entries in stack - 1.  */
       if (ob->local_trees
 	  && ob->local_trees->contains (expr))
@@ -1726,7 +1803,12 @@ lto_output_tree (struct output_block *ob, tree expr,
 
   if (this_ref_p && tree_is_indexable (expr))
     {
-      lto_output_tree_ref (ob, expr);
+      enum LTO_tags tag;
+      unsigned ix;
+
+      lto_indexable_tree_ref (ob, expr, &tag, &ix);
+      streamer_write_record_start (ob, tag);
+      streamer_write_uhwi (ob, ix);
       return;
     }
 
@@ -1791,8 +1873,9 @@ lto_output_tree (struct output_block *ob, tree expr,
 	    }
 	  streamer_write_record_start (ob, LTO_tree_pickle_reference);
 	  streamer_write_uhwi (ob, ix);
-	  streamer_write_enum (ob->main_stream, LTO_tags, LTO_NUM_TAGS,
-			       lto_tree_code_to_tag (TREE_CODE (expr)));
+	  if (streamer_debugging)
+	    streamer_write_enum (ob->main_stream, LTO_tags, LTO_NUM_TAGS,
+				 lto_tree_code_to_tag (TREE_CODE (expr)));
 	}
       in_dfs_walk = false;
       lto_stats.num_pickle_refs_output++;
@@ -2038,9 +2121,11 @@ output_cfg (struct output_block *ob, struct function *fn)
       streamer_write_uhwi (ob, EDGE_COUNT (bb->succs));
       FOR_EACH_EDGE (e, ei, bb->succs)
 	{
-	  streamer_write_uhwi (ob, e->dest->index);
+	  bitpack_d bp = bitpack_create (ob->main_stream);
+	  bp_pack_var_len_unsigned (&bp, e->dest->index);
+	  bp_pack_var_len_unsigned (&bp, e->flags);
+	  stream_output_location_and_block (ob, &bp, e->goto_locus);
 	  e->probability.stream_out (ob);
-	  streamer_write_uhwi (ob, e->flags);
 	}
     }
 
@@ -2212,7 +2297,7 @@ collect_block_tree_leafs (tree root, vec<tree> &leafs)
     if (! BLOCK_SUBBLOCKS (root))
       leafs.safe_push (root);
     else
-      collect_block_tree_leafs (BLOCK_SUBBLOCKS (root), leafs);
+      collect_block_tree_leafs (root, leafs);
 }
 
 /* This performs function body modifications that are needed for streaming
@@ -2271,6 +2356,29 @@ lto_prepare_function_for_streaming (struct cgraph_node *node)
 
 }
 
+/* Emit the chain of tree nodes starting at T.  OB is the output block
+   to write to.  REF_P is true if chain elements should be emitted
+   as references.  */
+
+static void
+streamer_write_chain (struct output_block *ob, tree t, bool ref_p)
+{
+  while (t)
+    {
+      /* We avoid outputting external vars or functions by reference
+	 to the global decls section as we do not want to have them
+	 enter decl merging.  We should not need to do this anymore because
+	 free_lang_data removes them from block scopes.  */
+      gcc_assert (!VAR_OR_FUNCTION_DECL_P (t) || !DECL_EXTERNAL (t));
+      stream_write_tree (ob, t, ref_p);
+
+      t = TREE_CHAIN (t);
+    }
+
+  /* Write a sentinel to terminate the chain.  */
+  stream_write_tree (ob, NULL_TREE, ref_p);
+}
+
 /* Output the body of function NODE->DECL.  */
 
 static void
@@ -2289,7 +2397,6 @@ output_function (struct cgraph_node *node)
   fn = DECL_STRUCT_FUNCTION (function);
   ob = create_output_block (LTO_section_function_body);
 
-  clear_line_info (ob);
   ob->symbol = node;
 
   gcc_assert (current_function_decl == NULL_TREE && cfun == NULL);
@@ -2320,7 +2427,7 @@ output_function (struct cgraph_node *node)
   /* As we do not recurse into BLOCK_SUBBLOCKS but only BLOCK_SUPERCONTEXT
      collect block tree leafs and stream those.  */
   auto_vec<tree> block_tree_leafs;
-  if (DECL_INITIAL (function))
+  if (DECL_INITIAL (function) && DECL_INITIAL (function) != error_mark_node)
     collect_block_tree_leafs (DECL_INITIAL (function), block_tree_leafs);
   streamer_write_uhwi (ob, block_tree_leafs.length ());
   for (unsigned i = 0; i < block_tree_leafs.length (); ++i)
@@ -2332,6 +2439,8 @@ output_function (struct cgraph_node *node)
     {
       streamer_write_uhwi (ob, 1);
       output_struct_function_base (ob, fn);
+
+      output_cfg (ob, fn);
 
       /* Output all the SSA names used in the function.  */
       output_ssa_names (ob, fn);
@@ -2345,8 +2454,6 @@ output_function (struct cgraph_node *node)
 
       /* The terminator for this function.  */
       streamer_write_record_start (ob, LTO_null);
-
-      output_cfg (ob, fn);
    }
   else
     streamer_write_uhwi (ob, 0);
@@ -2375,7 +2482,6 @@ output_constructor (struct varpool_node *node)
   timevar_push (TV_IPA_LTO_CTORS_OUT);
   ob = create_output_block (LTO_section_function_body);
 
-  clear_line_info (ob);
   ob->symbol = node;
 
   /* Make string 0 be a NULL string.  */
@@ -2567,7 +2673,7 @@ produce_lto_section ()
 
   bool slim_object = flag_generate_lto && !flag_fat_lto_objects;
   lto_section s
-    = { LTO_major_version, LTO_minor_version, slim_object, 0 };
+    = { LTO_major_version, LTO_minor_version, slim_object, 0, 0 };
   s.set_compression (compression);
   lto_write_data (&s, sizeof s);
   lto_end_section ();
@@ -2577,10 +2683,12 @@ produce_lto_section ()
 /* Compare symbols to get them sorted by filename (to optimize streaming)  */
 
 static int
-cmp_symbol_files (const void *pn1, const void *pn2)
+cmp_symbol_files (const void *pn1, const void *pn2, void *id_map_)
 {
   const symtab_node *n1 = *(const symtab_node * const *)pn1;
   const symtab_node *n2 = *(const symtab_node * const *)pn2;
+  hash_map<lto_file_decl_data *, int> *id_map
+    = (hash_map<lto_file_decl_data *, int> *)id_map_;
 
   int file_order1 = n1->lto_file_data ? n1->lto_file_data->order : -1;
   int file_order2 = n2->lto_file_data ? n2->lto_file_data->order : -1;
@@ -2592,12 +2700,7 @@ cmp_symbol_files (const void *pn1, const void *pn2)
 
   /* Order within static library.  */
   if (n1->lto_file_data && n1->lto_file_data->id != n2->lto_file_data->id)
-    {
-      if (n1->lto_file_data->id > n2->lto_file_data->id)
-	return 1;
-      if (n1->lto_file_data->id < n2->lto_file_data->id)
-	return -1;
-    }
+    return *id_map->get (n1->lto_file_data) - *id_map->get (n2->lto_file_data);
 
   /* And finaly order by the definition order.  */
   return n1->order - n2->order;
@@ -2653,7 +2756,23 @@ lto_output (void)
 	    symbols_to_copy.safe_push (node);
 	}
     }
-  symbols_to_copy.qsort (cmp_symbol_files);
+  /* Map the section hash to an order it appears in symbols_to_copy
+     since we want to sort same ID symbols next to each other but need
+     to avoid making overall order depend on the actual hash value.  */
+  int order = 0;
+  hash_map<lto_file_decl_data *, int> id_map;
+  for (i = 0; i < symbols_to_copy.length (); ++i)
+    {
+      symtab_node *snode = symbols_to_copy[i];
+      if (snode->lto_file_data)
+	{
+	  bool existed_p = false;
+	  int &ord = id_map.get_or_insert (snode->lto_file_data, &existed_p);
+	  if (!existed_p)
+	    ord = order++;
+	}
+    }
+  symbols_to_copy.sort (cmp_symbol_files, (void *)&id_map);
   for (i = 0; i < symbols_to_copy.length (); i++)
     {
       symtab_node *snode = symbols_to_copy[i];
@@ -2672,7 +2791,8 @@ lto_output (void)
 		  && flag_incremental_link != INCREMENTAL_LINK_LTO)
 	      /* Thunks have no body but they may be synthetized
 		 at WPA time.  */
-	      || DECL_ARGUMENTS (cnode->decl)))
+	      || DECL_ARGUMENTS (cnode->decl)
+	      || cnode->declare_variant_alt))
 	output_function (cnode);
       else if ((vnode = dyn_cast <varpool_node *> (snode))
 	       && (DECL_INITIAL (vnode->decl) != error_mark_node

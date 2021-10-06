@@ -1,5 +1,5 @@
 /* Deal with interfaces.
-   Copyright (C) 2000-2020 Free Software Foundation, Inc.
+   Copyright (C) 2000-2021 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -1257,7 +1257,7 @@ generic_correspondence (gfc_formal_arglist *f1, gfc_formal_arglist *f2,
 
   while (f1)
     {
-      if (f1->sym->attr.optional)
+      if (!f1->sym || f1->sym->attr.optional)
 	goto next;
 
       if (p1 && strcmp (f1->sym->name, p1) == 0)
@@ -1343,7 +1343,8 @@ gfc_check_dummy_characteristics (gfc_symbol *s1, gfc_symbol *s2,
     }
 
   /* Check INTENT.  */
-  if (s1->attr.intent != s2->attr.intent)
+  if (s1->attr.intent != s2->attr.intent && !s1->attr.artificial
+      && !s2->attr.artificial)
     {
       snprintf (errmsg, err_len, "INTENT mismatch in argument '%s'",
 		s1->name);
@@ -1464,6 +1465,19 @@ gfc_check_dummy_characteristics (gfc_symbol *s1, gfc_symbol *s2,
     {
       int i, compval;
       gfc_expr *shape1, *shape2;
+
+      /* Sometimes the ambiguity between deferred shape and assumed shape
+	 does not get resolved in module procedures, where the only explicit
+	 declaration of the dummy is in the interface.  */
+      if (s1->ns->proc_name && s1->ns->proc_name->attr.module_procedure
+	  && s1->as->type == AS_ASSUMED_SHAPE
+	  && s2->as->type == AS_DEFERRED)
+	{
+	  s2->as->type = AS_ASSUMED_SHAPE;
+	  for (i = 0; i < s2->as->rank; i++)
+	    if (s1->as->lower[i] != NULL)
+	      s2->as->lower[i] = gfc_copy_expr (s1->as->lower[i]);
+	}
 
       if (s1->as->type != s2->as->type)
 	{
@@ -1981,7 +1995,8 @@ check_interface1 (gfc_interface *p, gfc_interface *q0,
 static void
 check_sym_interfaces (gfc_symbol *sym)
 {
-  char interface_name[GFC_MAX_SYMBOL_LEN + sizeof("generic interface ''")];
+  /* Provide sufficient space to hold "generic interface 'symbol.symbol'".  */
+  char interface_name[2*GFC_MAX_SYMBOL_LEN+2 + sizeof("generic interface ''")];
   gfc_interface *p;
 
   if (sym->ns != gfc_current_ns)
@@ -1989,6 +2004,8 @@ check_sym_interfaces (gfc_symbol *sym)
 
   if (sym->generic != NULL)
     {
+      size_t len = strlen (sym->name) + sizeof("generic interface ''");
+      gcc_assert (len < sizeof (interface_name));
       sprintf (interface_name, "generic interface '%s'", sym->name);
       if (check_interface0 (sym->generic, interface_name))
 	return;
@@ -2310,6 +2327,7 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
   bool rank_check, is_pointer;
   char err[200];
   gfc_component *ppc;
+  bool codimension = false;
 
   /* If the formal arg has type BT_VOID, it's to one of the iso_c_binding
      procs c_f_pointer or c_f_procpointer, and we need to accept most
@@ -2430,6 +2448,21 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
       return false;
     }
 
+  /* TS29113 C407c; F2018 C711.  */
+  if (actual->ts.type == BT_ASSUMED
+      && symbol_rank (formal) == -1
+      && actual->rank != -1
+      && !(actual->symtree->n.sym->as
+	   && actual->symtree->n.sym->as->type == AS_ASSUMED_SHAPE))
+    {
+      if (where)
+	gfc_error ("Assumed-type actual argument at %L corresponding to "
+		   "assumed-rank dummy argument %qs must be "
+		   "assumed-shape or assumed-rank",
+		   &actual->where, formal->name);
+      return false;
+    }
+
   /* F2008, 12.5.2.5; IR F08/0073.  */
   if (formal->ts.type == BT_CLASS && formal->attr.class_ok
       && actual->expr_type != EXPR_NULL
@@ -2473,7 +2506,12 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
       return false;
     }
 
-  if (formal->attr.codimension && !gfc_is_coarray (actual))
+  if (formal->ts.type == BT_CLASS && formal->attr.class_ok)
+    codimension = CLASS_DATA (formal)->attr.codimension;
+  else
+    codimension = formal->attr.codimension;
+
+  if (codimension && !gfc_is_coarray (actual))
     {
       if (where)
 	gfc_error ("Actual argument to %qs at %L must be a coarray",
@@ -2481,7 +2519,7 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
       return false;
     }
 
-  if (formal->attr.codimension && formal->attr.allocatable)
+  if (codimension && formal->attr.allocatable)
     {
       gfc_ref *last = NULL;
 
@@ -2503,7 +2541,7 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
 	}
     }
 
-  if (formal->attr.codimension)
+  if (codimension)
     {
       /* F2008, 12.5.2.8 + Corrig 2 (IR F08/0048).  */
       /* F2018, 12.5.2.8.  */
@@ -2569,7 +2607,7 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
       return false;
     }
 
-  if (formal->attr.allocatable && !formal->attr.codimension
+  if (formal->attr.allocatable && !codimension
       && actual_attr.codimension)
     {
       if (formal->attr.intent == INTENT_OUT)
@@ -2611,9 +2649,11 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
 		   && formal->as->type == AS_ASSUMED_SHAPE))
 	  && actual->expr_type != EXPR_NULL)
       || (actual->rank == 0 && formal->attr.dimension
-	  && gfc_is_coindexed (actual)))
+	  && gfc_is_coindexed (actual))
+      /* Assumed-rank actual argument; F2018 C838.  */
+      || actual->rank == -1)
     {
-      if (where 
+      if (where
 	  && (!formal->attr.artificial || (!formal->maybe_array
 					   && !maybe_dummy_array_arg (actual))))
 	{
@@ -2704,7 +2744,7 @@ compare_parameter (gfc_symbol *formal, gfc_expr *actual,
 
   if (ref == NULL && actual->expr_type != EXPR_NULL)
     {
-      if (where 
+      if (where
 	  && (!formal->attr.artificial || (!formal->maybe_array
 					   && !maybe_dummy_array_arg (actual))))
 	{
@@ -3158,21 +3198,21 @@ gfc_compare_actual_formal (gfc_actual_arglist **ap, gfc_formal_arglist *formal,
 			      is_elemental, where))
 	return false;
 
-      /* TS 29113, 6.3p2.  */
+      /* TS 29113, 6.3p2; F2018 15.5.2.4.  */
       if (f->sym->ts.type == BT_ASSUMED
 	  && (a->expr->ts.type == BT_DERIVED
 	      || (a->expr->ts.type == BT_CLASS && CLASS_DATA (a->expr))))
 	{
-	  gfc_namespace *f2k_derived;
-
-	  f2k_derived = a->expr->ts.type == BT_DERIVED
-			? a->expr->ts.u.derived->f2k_derived
-			: CLASS_DATA (a->expr)->ts.u.derived->f2k_derived;
-
-	  if (f2k_derived
-	      && (f2k_derived->finalizers || f2k_derived->tb_sym_root))
+	  gfc_symbol *derived = (a->expr->ts.type == BT_DERIVED
+				 ? a->expr->ts.u.derived
+				 : CLASS_DATA (a->expr)->ts.u.derived);
+	  gfc_namespace *f2k_derived = derived->f2k_derived;
+	  if (derived->attr.pdt_type
+	      || (f2k_derived
+		  && (f2k_derived->finalizers || f2k_derived->tb_sym_root)))
 	    {
-	      gfc_error ("Actual argument at %L to assumed-type dummy is of "
+	      gfc_error ("Actual argument at %L to assumed-type dummy "
+			 "has type parameters or is of "
 			 "derived type with type-bound or FINAL procedures",
 			 &a->expr->where);
 	      return false;
@@ -3232,10 +3272,13 @@ gfc_compare_actual_formal (gfc_actual_arglist **ap, gfc_formal_arglist *formal,
 	  && f->sym->attr.flavor != FL_PROCEDURE)
 	{
 	  if (a->expr->ts.type == BT_CHARACTER && !f->sym->as && where)
-	    gfc_warning (0, "Character length of actual argument shorter "
-			 "than of dummy argument %qs (%lu/%lu) at %L",
-			 f->sym->name, actual_size, formal_size,
-			 &a->expr->where);
+	    {
+	      gfc_warning (0, "Character length of actual argument shorter "
+			   "than of dummy argument %qs (%lu/%lu) at %L",
+			   f->sym->name, actual_size, formal_size,
+			   &a->expr->where);
+	      goto skip_size_check;
+	    }
           else if (where)
 	    {
 	      /* Emit a warning for -std=legacy and an error otherwise. */
@@ -3286,7 +3329,10 @@ gfc_compare_actual_formal (gfc_actual_arglist **ap, gfc_formal_arglist *formal,
 	  return false;
 	}
 
-      if (f->sym->as && f->sym->as->type == AS_ASSUMED_SHAPE
+      if (f->sym->as
+	  && (f->sym->as->type == AS_ASSUMED_SHAPE
+	      || f->sym->as->type == AS_DEFERRED
+	      || (f->sym->as->type == AS_ASSUMED_RANK && f->sym->attr.pointer))
 	  && a->expr->expr_type == EXPR_VARIABLE
 	  && a->expr->symtree->n.sym->as
 	  && a->expr->symtree->n.sym->as->type == AS_ASSUMED_SIZE
@@ -3509,6 +3555,10 @@ gfc_compare_actual_formal (gfc_actual_arglist **ap, gfc_formal_arglist *formal,
 	  return false;
 	}
     }
+
+  /* We should have handled the cases where the formal arglist is null
+     already.  */
+  gcc_assert (n > 0);
 
   /* The argument lists are compatible.  We now relink a new actual
      argument list with null arguments in the right places.  The head
@@ -3961,7 +4011,7 @@ gfc_procedure_use (gfc_symbol *sym, gfc_actual_arglist **ap, locus *where)
   if (!gfc_compare_actual_formal (ap, dummy_args, 0, sym->attr.elemental,
 				  sym->attr.proc == PROC_ST_FUNCTION, where))
     return false;
- 
+
   if (!check_intents (dummy_args, *ap))
     return false;
 
@@ -5281,7 +5331,9 @@ gfc_find_specific_dtio_proc (gfc_symbol *derived, bool write, bool formatted)
     }
 
 finish:
-  if (dtio_sub && derived != CLASS_DATA (dtio_sub->formal->sym)->ts.u.derived)
+  if (dtio_sub
+      && dtio_sub->formal->sym->ts.type == BT_CLASS
+      && derived != CLASS_DATA (dtio_sub->formal->sym)->ts.u.derived)
     gfc_find_derived_vtab (derived);
 
   return dtio_sub;

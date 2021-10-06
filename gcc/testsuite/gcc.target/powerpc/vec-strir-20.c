@@ -1,6 +1,7 @@
-/* { dg-do run } */
-/* { dg-require-effective-target powerpc_future_hw } */
-/* { dg-options "-O1 -mdejagnu-cpu=future" } */
+/* { dg-do run { target { power10_hw } } } */
+/* { dg-do link { target { ! power10_hw } } } */
+/* { dg-require-effective-target power10_ok } */
+/* { dg-options "-O1 -mdejagnu-cpu=power10" } */
 /* See vec-strir-21.c for the same test with -O2 optimization.  */
 
 #include <altivec.h>

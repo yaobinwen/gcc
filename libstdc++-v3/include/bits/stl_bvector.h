@@ -1,6 +1,6 @@
 // vector<bool> specialization -*- C++ -*-
 
-// Copyright (C) 2001-2020 Free Software Foundation, Inc.
+// Copyright (C) 2001-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -83,6 +83,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
     _Bit_reference(const _Bit_reference&) = default;
 #endif
 
+    _GLIBCXX_NODISCARD
     operator bool() const _GLIBCXX_NOEXCEPT
     { return !!(*_M_p & _M_mask); }
 
@@ -100,10 +101,12 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
     operator=(const _Bit_reference& __x) _GLIBCXX_NOEXCEPT
     { return *this = bool(__x); }
 
+    _GLIBCXX_NODISCARD
     bool
     operator==(const _Bit_reference& __x) const
     { return bool(*this) == bool(__x); }
 
+    _GLIBCXX_NODISCARD
     bool
     operator<(const _Bit_reference& __x) const
     { return !bool(*this) && bool(__x); }
@@ -182,11 +185,13 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       _M_offset = static_cast<unsigned int>(__n);
     }
 
+    _GLIBCXX_NODISCARD
     friend _GLIBCXX20_CONSTEXPR bool
     operator==(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     { return __x._M_p == __y._M_p && __x._M_offset == __y._M_offset; }
 
 #if __cpp_lib_three_way_comparison
+    [[nodiscard]]
     friend constexpr strong_ordering
     operator<=>(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     noexcept
@@ -196,6 +201,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return __x._M_offset <=> __y._M_offset;
     }
 #else
+    _GLIBCXX_NODISCARD
     friend bool
     operator<(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     {
@@ -203,18 +209,22 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	    || (__x._M_p == __y._M_p && __x._M_offset < __y._M_offset);
     }
 
+    _GLIBCXX_NODISCARD
     friend bool
     operator!=(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     { return !(__x == __y); }
 
+    _GLIBCXX_NODISCARD
     friend bool
     operator>(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     { return __y < __x; }
 
+    _GLIBCXX_NODISCARD
     friend bool
     operator<=(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     { return !(__y < __x); }
 
+    _GLIBCXX_NODISCARD
     friend bool
     operator>=(const _Bit_iterator_base& __x, const _Bit_iterator_base& __y)
     { return !(__x < __y); }
@@ -247,6 +257,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
     _M_const_cast() const
     { return *this; }
 
+    _GLIBCXX_NODISCARD
     reference
     operator*() const
     { return reference(_M_p, 1UL << _M_offset); }
@@ -295,10 +306,12 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return *this;
     }
 
+    _GLIBCXX_NODISCARD
     reference
     operator[](difference_type __i) const
     { return *(*this + __i); }
 
+    _GLIBCXX_NODISCARD
     friend iterator
     operator+(const iterator& __x, difference_type __n)
     {
@@ -307,10 +320,12 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return __tmp;
     }
 
+    _GLIBCXX_NODISCARD
     friend iterator
     operator+(difference_type __n, const iterator& __x)
     { return __x + __n; }
 
+    _GLIBCXX_NODISCARD
     friend iterator
     operator-(const iterator& __x, difference_type __n)
     {
@@ -343,6 +358,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
     _M_const_cast() const
     { return _Bit_iterator(_M_p, _M_offset); }
 
+    _GLIBCXX_NODISCARD
     const_reference
     operator*() const
     { return _Bit_reference(_M_p, 1UL << _M_offset); }
@@ -391,10 +407,12 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return *this;
     }
 
+    _GLIBCXX_NODISCARD
     const_reference
     operator[](difference_type __i) const
     { return *(*this + __i); }
 
+    _GLIBCXX_NODISCARD
     friend const_iterator
     operator+(const const_iterator& __x, difference_type __n)
     {
@@ -403,6 +421,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return __tmp;
     }
 
+    _GLIBCXX_NODISCARD
     friend const_iterator
     operator-(const const_iterator& __x, difference_type __n)
     {
@@ -411,6 +430,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       return __tmp;
     }
 
+    _GLIBCXX_NODISCARD
     friend const_iterator
     operator+(difference_type __n, const const_iterator& __x)
     { return __x + __n; }
@@ -427,53 +447,75 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 
       struct _Bvector_impl_data
       {
-	_Bit_iterator 	_M_start;
-	_Bit_iterator 	_M_finish;
-	_Bit_pointer 	_M_end_of_storage;
+#if !_GLIBCXX_INLINE_VERSION
+	_Bit_iterator	_M_start;
+#else
+	// We don't need the offset field for the start, it's always zero.
+	struct {
+	  _Bit_type* _M_p;
+	  // Allow assignment from iterators (assume offset is zero):
+	  void operator=(_Bit_iterator __it) { _M_p = __it._M_p; }
+	} _M_start;
+#endif
+	_Bit_iterator	_M_finish;
+	_Bit_pointer	_M_end_of_storage;
 
 	_Bvector_impl_data() _GLIBCXX_NOEXCEPT
 	: _M_start(), _M_finish(), _M_end_of_storage()
 	{ }
 
 #if __cplusplus >= 201103L
+	_Bvector_impl_data(const _Bvector_impl_data&) = default;
+	_Bvector_impl_data&
+	operator=(const _Bvector_impl_data&) = default;
+
 	_Bvector_impl_data(_Bvector_impl_data&& __x) noexcept
-	: _M_start(__x._M_start), _M_finish(__x._M_finish)
-	, _M_end_of_storage(__x._M_end_of_storage)
+	: _Bvector_impl_data(__x)
 	{ __x._M_reset(); }
 
 	void
 	_M_move_data(_Bvector_impl_data&& __x) noexcept
 	{
-	  this->_M_start = __x._M_start;
-	  this->_M_finish = __x._M_finish;
-	  this->_M_end_of_storage = __x._M_end_of_storage;
+	  *this = __x;
 	  __x._M_reset();
 	}
 #endif
 
 	void
 	_M_reset() _GLIBCXX_NOEXCEPT
+	{ *this = _Bvector_impl_data(); }
+
+	void
+	_M_swap_data(_Bvector_impl_data& __x) _GLIBCXX_NOEXCEPT
 	{
-	  _M_start = _M_finish = _Bit_iterator();
-	  _M_end_of_storage = _Bit_pointer();
+	  // Do not use std::swap(_M_start, __x._M_start), etc as it loses
+	  // information used by TBAA.
+	  std::swap(*this, __x);
 	}
       };
 
       struct _Bvector_impl
 	: public _Bit_alloc_type, public _Bvector_impl_data
-	{
-	public:
-	  _Bvector_impl() _GLIBCXX_NOEXCEPT_IF(
-		is_nothrow_default_constructible<_Bit_alloc_type>::value)
-	  : _Bit_alloc_type()
-	  { }
+      {
+	_Bvector_impl() _GLIBCXX_NOEXCEPT_IF(
+	  is_nothrow_default_constructible<_Bit_alloc_type>::value)
+	: _Bit_alloc_type()
+	{ }
 
-	  _Bvector_impl(const _Bit_alloc_type& __a) _GLIBCXX_NOEXCEPT
-	  : _Bit_alloc_type(__a)
-	  { }
+	_Bvector_impl(const _Bit_alloc_type& __a) _GLIBCXX_NOEXCEPT
+	: _Bit_alloc_type(__a)
+	{ }
 
 #if __cplusplus >= 201103L
-	_Bvector_impl(_Bvector_impl&&) = default;
+	// Not defaulted, to enforce noexcept(true) even when
+	// !is_nothrow_move_constructible<_Bit_alloc_type>.
+	_Bvector_impl(_Bvector_impl&& __x) noexcept
+	: _Bit_alloc_type(std::move(__x)), _Bvector_impl_data(std::move(__x))
+	{ }
+
+	_Bvector_impl(_Bit_alloc_type&& __a, _Bvector_impl&& __x) noexcept
+	: _Bit_alloc_type(std::move(__a)), _Bvector_impl_data(std::move(__x))
+	{ }
 #endif
 
 	_Bit_type*
@@ -511,6 +553,10 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 
 #if __cplusplus >= 201103L
       _Bvector_base(_Bvector_base&&) = default;
+
+      _Bvector_base(_Bvector_base&& __x, const allocator_type& __a) noexcept
+      : _M_impl(_Bit_alloc_type(__a), std::move(__x._M_impl))
+      { }
 #endif
 
       ~_Bvector_base()
@@ -546,18 +592,6 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       _S_nword(size_t __n)
       { return (__n + int(_S_word_bit) - 1) / int(_S_word_bit); }
     };
-
-_GLIBCXX_END_NAMESPACE_CONTAINER
-_GLIBCXX_END_NAMESPACE_VERSION
-} // namespace std
-
-// Declare a partial specialization of vector<T, Alloc>.
-#include <bits/stl_vector.h>
-
-namespace std _GLIBCXX_VISIBILITY(default)
-{
-_GLIBCXX_BEGIN_NAMESPACE_VERSION
-_GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 
   /**
    *  @brief  A specialization of vector for booleans which offers fixed time
@@ -647,14 +681,18 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       : _Base(_Bit_alloc_traits::_S_select_on_copy(__x._M_get_Bit_allocator()))
       {
 	_M_initialize(__x.size());
-	_M_copy_aligned(__x.begin(), __x.end(), this->_M_impl._M_start);
+	_M_copy_aligned(__x.begin(), __x.end(), begin());
       }
 
 #if __cplusplus >= 201103L
       vector(vector&&) = default;
 
-      vector(vector&& __x, const allocator_type& __a)
-      noexcept(_Bit_alloc_traits::_S_always_equal())
+    private:
+      vector(vector&& __x, const allocator_type& __a, true_type) noexcept
+      : _Base(std::move(__x), __a)
+      { }
+
+      vector(vector&& __x, const allocator_type& __a, false_type)
       : _Base(__a)
       {
 	if (__x.get_allocator() == __a)
@@ -667,11 +705,18 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	  }
       }
 
-      vector(const vector& __x, const allocator_type& __a)
+    public:
+      vector(vector&& __x, const __type_identity_t<allocator_type>& __a)
+      noexcept(_Bit_alloc_traits::_S_always_equal())
+      : vector(std::move(__x), __a,
+	       typename _Bit_alloc_traits::is_always_equal{})
+      { }
+
+      vector(const vector& __x, const __type_identity_t<allocator_type>& __a)
       : _Base(__a)
       {
 	_M_initialize(__x.size());
-	_M_copy_aligned(__x.begin(), __x.end(), this->_M_impl._M_start);
+	_M_copy_aligned(__x.begin(), __x.end(), begin());
       }
 
       vector(initializer_list<bool> __l,
@@ -689,13 +734,17 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	vector(_InputIterator __first, _InputIterator __last,
 	       const allocator_type& __a = allocator_type())
 	: _Base(__a)
-	{ _M_initialize_dispatch(__first, __last, __false_type()); }
+	{
+	  _M_initialize_range(__first, __last,
+			      std::__iterator_category(__first));
+	}
 #else
       template<typename _InputIterator>
 	vector(_InputIterator __first, _InputIterator __last,
 	       const allocator_type& __a = allocator_type())
 	: _Base(__a)
 	{
+	  // Check whether it's an integral type. If so, it's not an iterator.
 	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_initialize_dispatch(__first, __last, _Integral());
 	}
@@ -762,7 +811,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       vector&
       operator=(initializer_list<bool> __l)
       {
-	this->assign (__l.begin(), __l.end());
+	this->assign(__l.begin(), __l.end());
 	return *this;
       }
 #endif
@@ -786,6 +835,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	void
 	assign(_InputIterator __first, _InputIterator __last)
 	{
+	  // Check whether it's an integral type. If so, it's not an iterator.
 	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_assign_dispatch(__first, __last, _Integral());
 	}
@@ -797,60 +847,74 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       { _M_assign_aux(__l.begin(), __l.end(), random_access_iterator_tag()); }
 #endif
 
+      _GLIBCXX_NODISCARD
       iterator
       begin() _GLIBCXX_NOEXCEPT
       { return iterator(this->_M_impl._M_start._M_p, 0); }
 
+      _GLIBCXX_NODISCARD
       const_iterator
       begin() const _GLIBCXX_NOEXCEPT
       { return const_iterator(this->_M_impl._M_start._M_p, 0); }
 
+      _GLIBCXX_NODISCARD
       iterator
       end() _GLIBCXX_NOEXCEPT
       { return this->_M_impl._M_finish; }
 
+      _GLIBCXX_NODISCARD
       const_iterator
       end() const _GLIBCXX_NOEXCEPT
       { return this->_M_impl._M_finish; }
 
+      _GLIBCXX_NODISCARD
       reverse_iterator
       rbegin() _GLIBCXX_NOEXCEPT
       { return reverse_iterator(end()); }
 
+      _GLIBCXX_NODISCARD
       const_reverse_iterator
       rbegin() const _GLIBCXX_NOEXCEPT
       { return const_reverse_iterator(end()); }
 
+      _GLIBCXX_NODISCARD
       reverse_iterator
       rend() _GLIBCXX_NOEXCEPT
       { return reverse_iterator(begin()); }
 
+      _GLIBCXX_NODISCARD
       const_reverse_iterator
       rend() const _GLIBCXX_NOEXCEPT
       { return const_reverse_iterator(begin()); }
 
 #if __cplusplus >= 201103L
+      [[__nodiscard__]]
       const_iterator
       cbegin() const noexcept
       { return const_iterator(this->_M_impl._M_start._M_p, 0); }
 
+      [[__nodiscard__]]
       const_iterator
       cend() const noexcept
       { return this->_M_impl._M_finish; }
 
+      [[__nodiscard__]]
       const_reverse_iterator
       crbegin() const noexcept
       { return const_reverse_iterator(end()); }
 
+      [[__nodiscard__]]
       const_reverse_iterator
       crend() const noexcept
       { return const_reverse_iterator(begin()); }
 #endif
 
+      _GLIBCXX_NODISCARD
       size_type
       size() const _GLIBCXX_NOEXCEPT
       { return size_type(end() - begin()); }
 
+      _GLIBCXX_NODISCARD
       size_type
       max_size() const _GLIBCXX_NOEXCEPT
       {
@@ -863,6 +927,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 		? __asize * int(_S_word_bit) : __isize);
       }
 
+      _GLIBCXX_NODISCARD
       size_type
       capacity() const _GLIBCXX_NOEXCEPT
       { return size_type(const_iterator(this->_M_impl._M_end_addr(), 0)
@@ -872,19 +937,15 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       empty() const _GLIBCXX_NOEXCEPT
       { return begin() == end(); }
 
+      _GLIBCXX_NODISCARD
       reference
       operator[](size_type __n)
-      {
-	return *iterator(this->_M_impl._M_start._M_p
-			 + __n / int(_S_word_bit), __n % int(_S_word_bit));
-      }
+      { return begin()[__n]; }
 
+      _GLIBCXX_NODISCARD
       const_reference
       operator[](size_type __n) const
-      {
-	return *const_iterator(this->_M_impl._M_start._M_p
-			     + __n / int(_S_word_bit), __n % int(_S_word_bit));
-      }
+      { return begin()[__n]; }
 
     protected:
       void
@@ -915,18 +976,22 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	  _M_reallocate(__n);
       }
 
+      _GLIBCXX_NODISCARD
       reference
       front()
       { return *begin(); }
 
+      _GLIBCXX_NODISCARD
       const_reference
       front() const
       { return *begin(); }
 
+      _GLIBCXX_NODISCARD
       reference
       back()
       { return *(end() - 1); }
 
+      _GLIBCXX_NODISCARD
       const_reference
       back() const
       { return *(end() - 1); }
@@ -951,10 +1016,11 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       void
       swap(vector& __x) _GLIBCXX_NOEXCEPT
       {
-	std::swap(this->_M_impl._M_start, __x._M_impl._M_start);
-	std::swap(this->_M_impl._M_finish, __x._M_impl._M_finish);
-	std::swap(this->_M_impl._M_end_of_storage,
-		  __x._M_impl._M_end_of_storage);
+#if __cplusplus >= 201103L
+	__glibcxx_assert(_Bit_alloc_traits::propagate_on_container_swap::value
+			 || _M_get_Bit_allocator() == __x._M_get_Bit_allocator());
+#endif
+	this->_M_impl._M_swap_data(__x._M_impl);
 	_Bit_alloc_traits::_S_on_swap(_M_get_Bit_allocator(),
 				      __x._M_get_Bit_allocator());
       }
@@ -992,8 +1058,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	       _InputIterator __first, _InputIterator __last)
 	{
 	  difference_type __offset = __position - cbegin();
-	  _M_insert_dispatch(__position._M_const_cast(),
-			     __first, __last, __false_type());
+	  _M_insert_range(__position._M_const_cast(),
+			  __first, __last,
+			  std::__iterator_category(__first));
 	  return begin() + __offset;
 	}
 #else
@@ -1002,6 +1069,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	insert(iterator __position,
 	       _InputIterator __first, _InputIterator __last)
 	{
+	  // Check whether it's an integral type. If so, it's not an iterator.
 	  typedef typename std::__is_integer<_InputIterator>::__type _Integral;
 	  _M_insert_dispatch(__position, __first, __last, _Integral());
 	}
@@ -1113,15 +1181,10 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	  {
 	    _Bit_pointer __q = this->_M_allocate(__n);
 	    this->_M_impl._M_end_of_storage = __q + _S_nword(__n);
-	    this->_M_impl._M_start = iterator(std::__addressof(*__q), 0);
+	    iterator __start = iterator(std::__addressof(*__q), 0);
+	    this->_M_impl._M_start = __start;
+	    this->_M_impl._M_finish = __start + difference_type(__n);
 	  }
-	else
-	  {
-	    this->_M_impl._M_end_of_storage = _Bit_pointer();
-	    this->_M_impl._M_start = iterator(0, 0);
-	  }
-	this->_M_impl._M_finish = this->_M_impl._M_start + difference_type(__n);
-
       }
 
       void
@@ -1141,8 +1204,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       _M_shrink_to_fit();
 #endif
 
-      // Check whether it's an integral type.  If so, it's not an iterator.
-
+#if __cplusplus < 201103L
       // _GLIBCXX_RESOLVE_LIB_DEFECTS
       // 438. Ambiguity in the "do the right thing" clause
       template<typename _Integer>
@@ -1159,6 +1221,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 			       __false_type)
 	{ _M_initialize_range(__first, __last,
 			      std::__iterator_category(__first)); }
+#endif
 
       template<typename _InputIterator>
 	void
@@ -1176,7 +1239,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	{
 	  const size_type __n = std::distance(__first, __last);
 	  _M_initialize(__n);
-	  std::copy(__first, __last, this->_M_impl._M_start);
+	  std::copy(__first, __last, begin());
 	}
 
 #if __cplusplus < 201103L
@@ -1240,8 +1303,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	    }
 	}
 
-      // Check whether it's an integral type.  If so, it's not an iterator.
-
+#if __cplusplus < 201103L
       // _GLIBCXX_RESOLVE_LIB_DEFECTS
       // 438. Ambiguity in the "do the right thing" clause
       template<typename _Integer>
@@ -1257,6 +1319,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 			   __false_type)
 	{ _M_insert_range(__pos, __first, __last,
 			  std::__iterator_category(__first)); }
+#endif
 
       void
       _M_fill_insert(iterator __position, size_type __n, bool __x);

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build aix || darwin || dragonfly || freebsd || hurd || linux || netbsd || openbsd || solaris
 // +build aix darwin dragonfly freebsd hurd linux netbsd openbsd solaris
 
 // Fork, exec, wait, etc.
@@ -9,6 +10,7 @@
 package syscall
 
 import (
+	errorspkg "errors"
 	"internal/bytealg"
 	"runtime"
 	"sync"
@@ -62,6 +64,9 @@ import (
 
 //sysnb raw_dup2(oldfd int, newfd int) (err Errno)
 //dup2(oldfd _C_int, newfd _C_int) _C_int
+
+//sysnb raw_dup3(oldfd int, newfd int, flags int) (err Errno)
+//dup3(oldfd _C_int, newfd _C_int, flags _C_int) _C_int
 
 //sysnb raw_kill(pid Pid_t, sig Signal) (err Errno)
 //kill(pid Pid_t, sig _C_int) _C_int
@@ -241,6 +246,15 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 		}
 	}
 
+	// Both Setctty and Foreground use the Ctty field,
+	// but they give it slightly different meanings.
+	if sys.Setctty && sys.Foreground {
+		return 0, errorspkg.New("both Setctty and Foreground set in SysProcAttr")
+	}
+	if sys.Setctty && sys.Ctty >= len(attr.Files) {
+		return 0, errorspkg.New("Setctty set but Ctty not valid in child")
+	}
+
 	// Acquire the fork lock so that no other threads
 	// create new fds that are not yet close-on-exec
 	// before we fork.
@@ -261,7 +275,12 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error) 
 
 	// Read child error status from pipe.
 	Close(p[1])
-	n, err = readlen(p[0], (*byte)(unsafe.Pointer(&err1)), int(unsafe.Sizeof(err1)))
+	for {
+		n, err = readlen(p[0], (*byte)(unsafe.Pointer(&err1)), int(unsafe.Sizeof(err1)))
+		if err != EINTR {
+			break
+		}
+	}
 	Close(p[0])
 	if err != nil || n != 0 {
 		if n == int(unsafe.Sizeof(err1)) {
@@ -310,6 +329,7 @@ func runtime_AfterExec()
 // execveLibc is non-nil on OS using libc syscall, set to execve in exec_libc.go; this
 // avoids a build dependency for other platforms.
 var execveDarwin func(path *byte, argv **byte, envp **byte) error
+var execveOpenBSD func(path *byte, argv **byte, envp **byte) error
 
 // Exec invokes the execve(2) system call.
 func Exec(argv0 string, argv []string, envv []string) (err error) {
@@ -329,11 +349,14 @@ func Exec(argv0 string, argv []string, envv []string) (err error) {
 
 	var err1 error
 	if runtime.GOOS == "solaris" || runtime.GOOS == "illumos" || runtime.GOOS == "aix" || runtime.GOOS == "hurd" {
-		// RawSyscall should never be used on Solaris or AIX.
+		// RawSyscall should never be used on Solaris, illumos, or AIX.
 		err1 = raw_execve(argv0p, &argvp[0], &envvp[0])
-	} else if runtime.GOOS == "darwin" {
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
 		// Similarly on Darwin.
 		err1 = execveDarwin(argv0p, &argvp[0], &envvp[0])
+	} else if runtime.GOOS == "openbsd" && (runtime.GOARCH == "386" || runtime.GOARCH == "amd64" || runtime.GOARCH == "arm" || runtime.GOARCH == "arm64") {
+		// Similarly on OpenBSD.
+		err1 = execveOpenBSD(argv0p, &argvp[0], &envvp[0])
 	} else {
 		_, _, err1 = RawSyscall(SYS_EXECVE,
 			uintptr(unsafe.Pointer(argv0p)),

@@ -1,6 +1,6 @@
 // Debugging multiset implementation -*- C++ -*-
 
-// Copyright (C) 2003-2020 Free Software Foundation, Inc.
+// Copyright (C) 2003-2021 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -32,7 +32,7 @@
 #include <debug/safe_sequence.h>
 #include <debug/safe_container.h>
 #include <debug/safe_iterator.h>
-#include <utility>
+#include <bits/stl_pair.h>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -57,6 +57,16 @@ namespace __debug
 
       template<typename _ItT, typename _SeqT, typename _CatT>
 	friend class ::__gnu_debug::_Safe_iterator;
+
+      // Reference wrapper for base class. Disambiguates multiset(const _Base&)
+      // from copy constructor by requiring a user-defined conversion.
+      // See PR libstdc++/90102.
+      struct _Base_ref
+      {
+	_Base_ref(const _Base& __r) : _M_ref(__r) { }
+
+	const _Base& _M_ref;
+      };
 
     public:
       // types:
@@ -103,10 +113,11 @@ namespace __debug
       multiset(const allocator_type& __a)
       : _Base(__a) { }
 
-      multiset(const multiset& __m, const allocator_type& __a)
+      multiset(const multiset& __m,
+	       const __type_identity_t<allocator_type>& __a)
       : _Base(__m, __a) { }
 
-      multiset(multiset&& __m, const allocator_type& __a)
+      multiset(multiset&& __m, const __type_identity_t<allocator_type>& __a)
       noexcept( noexcept(_Base(std::move(__m._M_base()), __a)) )
       : _Safe(std::move(__m._M_safe()), __a),
 	_Base(std::move(__m._M_base()), __a) { }
@@ -138,8 +149,8 @@ namespace __debug
 		__gnu_debug::__base(__last),
 		__comp, __a) { }
 
-      multiset(const _Base& __x)
-      : _Base(__x) { }
+      multiset(_Base_ref __x)
+      : _Base(__x._M_ref) { }
 
 #if __cplusplus < 201103L
       multiset&

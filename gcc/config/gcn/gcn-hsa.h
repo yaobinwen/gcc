@@ -1,4 +1,4 @@
-/* Copyright (C) 2016-2020 Free Software Foundation, Inc.
+/* Copyright (C) 2016-2021 Free Software Foundation, Inc.
 
    This file is free software; you can redistribute it and/or modify it under
    the terms of the GNU General Public License as published by the Free
@@ -18,8 +18,8 @@
  #error elf.h included before elfos.h
 #endif
 
-#define TEXT_SECTION_ASM_OP "\t.section\t.text"
-#define BSS_SECTION_ASM_OP  "\t.section\t.bss"
+#define TEXT_SECTION_ASM_OP "\t.text"
+#define BSS_SECTION_ASM_OP  "\t.bss"
 #define GLOBAL_ASM_OP       "\t.globl\t"
 #define DATA_SECTION_ASM_OP "\t.data\t"
 #define SET_ASM_OP          "\t.set\t"
@@ -75,21 +75,40 @@ extern unsigned int gcn_local_sym_hash (const char *name);
    supported for gcn.  */
 #define GOMP_SELF_SPECS ""
 
+#ifdef HAVE_GCN_SRAM_ECC_FIJI
+#define A_FIJI
+#else
+#define A_FIJI "!march=*:;march=fiji:;"
+#endif
+#ifdef HAVE_GCN_SRAM_ECC_GFX900
+#define A_900
+#else
+#define A_900 "march=gfx900:;"
+#endif
+#ifdef HAVE_GCN_SRAM_ECC_GFX906
+#define A_906
+#else
+#define A_906 "march=gfx906:;"
+#endif
+#ifdef HAVE_GCN_SRAM_ECC_GFX908
+#define A_908
+#else
+#define A_908 "march=gfx908:;"
+#endif
+
+/* These targets can't have SRAM-ECC, even if a broken assembler allows it.  */
+#define DRIVER_SELF_SPECS \
+  "%{march=fiji|march=gfx900|march=gfx906:%{!msram-ecc=*:-msram-ecc=off}}"
+
 /* Use LLVM assembler and linker options.  */
-#define ASM_SPEC  "-triple=amdgcn--amdhsa -mattr=-code-object-v3 "  \
+#define ASM_SPEC  "-triple=amdgcn--amdhsa "  \
 		  "%:last_arg(%{march=*:-mcpu=%*}) " \
+		  "-mattr=%{mxnack:+xnack;:-xnack} " \
+		  /* FIXME: support "any" when we move to HSACOv4.  */ \
+		  "-mattr=%{" A_FIJI A_900 A_906 A_908 \
+			    "!msram-ecc=off:+sram-ecc;:-sram-ecc} " \
 		  "-filetype=obj"
-/* Add -mlocal-symbol-id=<source-file-basename> unless the user (or mkoffload)
-   passes the option explicitly on the command line.  The option also causes
-   several dump-matching tests to fail in the testsuite, so the option is not
-   added when or tree dump/compare-debug options used in the testsuite are
-   present.
-   This has the potential for surprise, but a user can still use an explicit
-   -mlocal-symbol-id=<whatever> option manually together with -fdump-tree or
-   -fcompare-debug options.  */
-#define CC1_SPEC "%{!mlocal-symbol-id=*:%{!fdump-tree-*:"	\
-		 "%{!fdump-ipa-*:%{!fcompare-debug*:-mlocal-symbol-id=%b}}}}"
-#define LINK_SPEC "--pie"
+#define LINK_SPEC "--pie --export-dynamic"
 #define LIB_SPEC  "-lc"
 
 /* Provides a _start symbol to keep the linker happy.  */
@@ -113,3 +132,4 @@ extern const char *last_arg_spec_function (int argc, const char **argv);
 #define DWARF2_DEBUGGING_INFO      1
 #define DWARF2_ASM_LINE_DEBUG_INFO 1
 #define EH_FRAME_THROUGH_COLLECT2  1
+#define DBX_REGISTER_NUMBER(REGNO) gcn_dwarf_register_number (REGNO)

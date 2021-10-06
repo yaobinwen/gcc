@@ -1,5 +1,5 @@
 /* Subroutines for insn-output.c for Motorola 68000 family.
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -1946,7 +1946,7 @@ m68k_output_btst (rtx countop, rtx dataop, rtx_code code, int signpos)
 
   if (GET_CODE (countop) == CONST_INT)
     {
-      register int count = INTVAL (countop);
+      int count = INTVAL (countop);
       /* If COUNT is bigger than size of storage unit in use,
 	 advance to the containing unit of same size.  */
       if (count > signpos)
@@ -1993,8 +1993,6 @@ m68k_output_btst (rtx countop, rtx dataop, rtx_code code, int signpos)
 	     count == 0 followed by bcc/bcs are also possible, but need
 	     m68k-specific CC_Z_IN_NOT_V and CC_Z_IN_NOT_C flags. */
 	}
-
-      cc_status.flags = CC_NOT_NEGATIVE;
     }
   output_asm_insn ("btst %0,%1", ops);
   return code;
@@ -3850,9 +3848,9 @@ fp_reg_operand (rtx op, machine_mode mode ATTRIBUTE_UNUSED)
 int
 emit_move_sequence (rtx *operands, machine_mode mode, rtx scratch_reg)
 {
-  register rtx operand0 = operands[0];
-  register rtx operand1 = operands[1];
-  register rtx tem;
+  rtx operand0 = operands[0];
+  rtx operand1 = operands[1];
+  rtx tem;
 
   if (scratch_reg
       && reload_in_progress && GET_CODE (operand0) == REG
@@ -5474,7 +5472,7 @@ output_andsi3 (rtx *operands)
 const char *
 output_iorsi3 (rtx *operands)
 {
-  register int logval;
+  int logval;
   CC_STATUS_INIT;
   if (GET_CODE (operands[2]) == CONST_INT
       && INTVAL (operands[2]) >> 16 == 0
@@ -5513,7 +5511,7 @@ output_iorsi3 (rtx *operands)
 const char *
 output_xorsi3 (rtx *operands)
 {
-  register int logval;
+  int logval;
   CC_STATUS_INIT;
   if (GET_CODE (operands[2]) == CONST_INT
       && INTVAL (operands[2]) >> 16 == 0
@@ -7117,6 +7115,9 @@ m68k_excess_precision (enum excess_precision_type type)
 	  return FLT_EVAL_METHOD_PROMOTE_TO_FLOAT;
 
 	return FLT_EVAL_METHOD_PROMOTE_TO_LONG_DOUBLE;
+      case EXCESS_PRECISION_TYPE_FLOAT16:
+	error ("%<-fexcess-precision=16%> is not supported on this target");
+	break;
       default:
 	gcc_unreachable ();
     }

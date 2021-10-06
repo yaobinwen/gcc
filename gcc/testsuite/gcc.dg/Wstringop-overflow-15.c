@@ -4,7 +4,8 @@
    for either kind of VLAs (member and non-member).
    Diagnosing the accesses is the subject of pr82608.
    { dg-do compile }
-   { dg-options "-O2 -Wall -Wno-array-bounds" } */
+   { dg-options "-O2 -Wall -Wno-array-bounds" }
+   { dg-require-effective-target alloca } */
 
 void sink (void*);
 
@@ -29,7 +30,7 @@ void vla_bounded (int n)
   a[0] = 0;
   a[1] = 1;
   a[n] = n;         // { dg-warning "\\\[-Wstringop-overflow" "pr82608" { xfail *-*-* } }
-  a[69] = n;        // { dg-warning "\\\[-Wstringop-overflow" "pr82608" { xfail *-*-* } }
+  a[69] = n;        // { dg-warning "\\\[-Wstringop-overflow" "pr82608" }
 
   sink (&a);
 }

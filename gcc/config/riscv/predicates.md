@@ -1,5 +1,5 @@
 ;; Predicate description for RISC-V target.
-;; Copyright (C) 2011-2020 Free Software Foundation, Inc.
+;; Copyright (C) 2011-2021 Free Software Foundation, Inc.
 ;; Contributed by Andrew Waterman (andrew@sifive.com).
 ;; Based on MIPS target for GNU compiler.
 ;;
@@ -198,6 +198,11 @@
 (define_predicate "signed_order_operator"
   (match_code "eq,ne,lt,le,ge,gt"))
 
+(define_predicate "subreg_lowpart_operator"
+  (ior (match_code "truncate")
+       (and (match_code "subreg")
+            (match_test "subreg_lowpart_p (op)"))))
+
 (define_predicate "fp_native_comparison"
   (match_code "eq,lt,le,gt,ge"))
 
@@ -206,3 +211,9 @@
 
 (define_predicate "fp_branch_comparison"
   (match_code "unordered,ordered,unlt,unge,unle,ungt,uneq,ltgt,ne,eq,lt,le,gt,ge"))
+
+(define_special_predicate "gpr_save_operation"
+  (match_code "parallel")
+{
+  return riscv_gpr_save_operation_p (op);
+})

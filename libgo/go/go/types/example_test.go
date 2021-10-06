@@ -5,6 +5,7 @@
 // Only run where builders (build.golang.org) have
 // access to compiled packages for import.
 //
+//go:build !arm && !arm64
 // +build !arm,!arm64
 
 package types_test
@@ -120,6 +121,9 @@ import "fmt"
 type Celsius float64
 func (c Celsius) String() string  { return fmt.Sprintf("%g°C", c) }
 func (c *Celsius) SetF(f float64) { *c = Celsius(f - 32 / 9 * 5) }
+
+type S struct { I; m int }
+type I interface { m() byte }
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "celsius.go", input, 0)
@@ -147,6 +151,11 @@ func (c *Celsius) SetF(f float64) { *c = Celsius(f - 32 / 9 * 5) }
 		fmt.Println()
 	}
 
+	// Print the method set of S.
+	styp := pkg.Scope().Lookup("S").Type()
+	fmt.Printf("Method set of %s:\n", styp)
+	fmt.Println(types.NewMethodSet(styp))
+
 	// no output for gccgo--can't import "fmt"
 	// Method set of temperature.Celsius:
 	// method (temperature.Celsius) String() string
@@ -154,6 +163,9 @@ func (c *Celsius) SetF(f float64) { *c = Celsius(f - 32 / 9 * 5) }
 	// Method set of *temperature.Celsius:
 	// method (*temperature.Celsius) SetF(f float64)
 	// method (*temperature.Celsius) String() string
+	//
+	// Method set of temperature.S:
+	// MethodSet {}
 }
 
 // ExampleInfo prints various facts recorded by the type checker in a

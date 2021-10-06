@@ -1,5 +1,5 @@
 /* C/ObjC/C++ command line option handling.
-   Copyright (C) 2002-2020 Free Software Foundation, Inc.
+   Copyright (C) 2002-2021 Free Software Foundation, Inc.
    Contributed by Neil Booth.
 
 This file is part of GCC.
@@ -113,6 +113,7 @@ static void set_std_cxx11 (int);
 static void set_std_cxx14 (int);
 static void set_std_cxx17 (int);
 static void set_std_cxx20 (int);
+static void set_std_cxx23 (int);
 static void set_std_c89 (int, int);
 static void set_std_c99 (int);
 static void set_std_c11 (int);
@@ -187,6 +188,14 @@ c_common_diagnostics_set_defaults (diagnostic_context *context)
   context->opt_permissive = OPT_fpermissive;
 }
 
+/* Input charset configuration for diagnostics.  */
+static const char *
+c_common_input_charset_cb (const char * /*filename*/)
+{
+  const char *cs = cpp_opts->input_charset;
+  return cpp_input_conversion_is_trivial (cs) ? nullptr : cs;
+}
+
 /* Whether options from all C-family languages should be accepted
    quietly.  */
 static bool accept_all_c_family_options = false;
@@ -213,6 +222,7 @@ c_common_init_options_struct (struct gcc_options *opts)
 
   /* By default, C99-like requirements for complex multiply and divide.  */
   opts->x_flag_complex_method = 2;
+  opts->x_flag_default_complex_method = opts->x_flag_complex_method;
 }
 
 /* Common initialization before calling option handlers.  */
@@ -234,6 +244,7 @@ c_common_init_options (unsigned int decoded_options_count,
   cpp_opts = cpp_get_options (parse_in);
   cpp_opts->dollars_in_ident = DOLLARS_IN_IDENTIFIERS;
   cpp_opts->objc = c_dialect_objc ();
+  cpp_opts->deps.modules = true;
 
   /* Reset to avoid warnings on internal definitions.  We set it just
      before passing on command-line options to cpplib.  */
@@ -256,9 +267,9 @@ c_common_init_options (unsigned int decoded_options_count,
 	  }
     }
 
-  /* Set C++ standard to C++14 if not specified on the command line.  */
+  /* Set C++ standard to C++17 if not specified on the command line.  */
   if (c_dialect_cxx ())
-    set_std_cxx14 (/*ISO*/false);
+    set_std_cxx17 (/*ISO*/false);
 
   global_dc->colorize_source_p = true;
 }
@@ -365,6 +376,18 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
     case OPT_MP:
       deps_seen = true;
       cpp_opts->deps.phony_targets = true;
+      break;
+
+    case OPT_Mmodules:
+      /* Do not set deps_seen, so the user can unconditionally turn
+	 this on or off.  */
+      cpp_opts->deps.modules = true;
+      break;
+
+    case OPT_Mno_modules:
+      /* Do not set deps_seen, so the user can unconditionally turn
+	 this on or off.  */
+      cpp_opts->deps.modules = false;
       break;
 
     case OPT_MQ:
@@ -504,12 +527,6 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
 	cpp_opts->track_macro_expansion = 2;
       break;
 
-    case OPT_ftabstop_:
-      /* It is documented that we silently ignore silly values.  */
-      if (value >= 1 && value <= 100)
-	cpp_opts->tabstop = value;
-      break;
-
     case OPT_fexec_charset_:
       cpp_opts->narrow_charset = arg;
       break;
@@ -642,6 +659,12 @@ c_common_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
 	set_std_cxx20 (code == OPT_std_c__20 /* ISO */);
       break;
 
+    case OPT_std_c__23:
+    case OPT_std_gnu__23:
+      if (!preprocessing_asm_p)
+	set_std_cxx23 (code == OPT_std_c__23 /* ISO */);
+      break;
+
     case OPT_std_c90:
     case OPT_std_iso9899_199409:
       if (!preprocessing_asm_p)
@@ -758,8 +781,6 @@ default_handle_c_option (size_t code ATTRIBUTE_UNUSED,
 bool
 c_common_post_options (const char **pfilename)
 {
-  struct cpp_callbacks *cb;
-
   /* Canonicalize the input and output filenames.  */
   if (in_fnames == NULL)
     {
@@ -840,9 +861,9 @@ c_common_post_options (const char **pfilename)
   else if (!flag_gnu89_inline && !flag_isoc99)
     error ("%<-fno-gnu89-inline%> is only supported in GNU99 or C99 mode");
 
-  /* Default to ObjC sjlj exception handling if NeXT runtime.  */
+  /* Default to ObjC sjlj exception handling if NeXT runtime < v2.  */
   if (flag_objc_sjlj_exceptions < 0)
-    flag_objc_sjlj_exceptions = flag_next_runtime;
+    flag_objc_sjlj_exceptions = (flag_next_runtime && flag_objc_abi < 2);
   if (flag_objc_exceptions && !flag_objc_sjlj_exceptions)
     flag_exceptions = 1;
 
@@ -931,6 +952,16 @@ c_common_post_options (const char **pfilename)
   SET_OPTION_IF_UNSET (&global_options, &global_options_set, warn_volatile,
 		       cxx_dialect >= cxx20 && warn_deprecated);
 
+  /* -Wdeprecated-enum-enum-conversion is enabled by default in C++20.  */
+  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+		       warn_deprecated_enum_enum_conv,
+		       cxx_dialect >= cxx20 && warn_deprecated);
+
+  /* -Wdeprecated-enum-float-conversion is enabled by default in C++20.  */
+  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+		       warn_deprecated_enum_float_conv,
+		       cxx_dialect >= cxx20 && warn_deprecated);
+
   /* Declone C++ 'structors if -Os.  */
   if (flag_declone_ctor_dtor == -1)
     flag_declone_ctor_dtor = optimize_size;
@@ -943,7 +974,7 @@ c_common_post_options (const char **pfilename)
 
   /* Change flag_abi_version to be the actual current ABI level, for the
      benefit of c_cpp_builtins, and to make comparison simpler.  */
-  const int latest_abi_version = 14;
+  const int latest_abi_version = 16;
   /* Generate compatibility aliases for ABI v11 (7.1) by default.  */
   const int abi_compat_default = 11;
 
@@ -993,6 +1024,10 @@ c_common_post_options (const char **pfilename)
   SET_OPTION_IF_UNSET (&global_options, &global_options_set, flag_finite_loops,
 		       optimize >= 2 && cxx_dialect >= cxx11);
 
+  /* It's OK to discard calls to pure/const functions that might throw.  */
+  SET_OPTION_IF_UNSET (&global_options, &global_options_set,
+		       flag_delete_dead_exceptions, true);
+
   if (cxx_dialect >= cxx11)
     {
       /* If we're allowing C++0x constructs, don't warn about C++98
@@ -1004,7 +1039,7 @@ c_common_post_options (const char **pfilename)
 	warn_narrowing = 1;
 
       /* Unless -f{,no-}ext-numeric-literals has been used explicitly,
-	 for -std=c++{11,14,17,2a} default to -fno-ext-numeric-literals.  */
+	 for -std=c++{11,14,17,20,23} default to -fno-ext-numeric-literals.  */
       if (flag_iso && !global_options_set.x_flag_ext_numeric_literals)
 	cpp_opts->ext_numeric_literals = 0;
     }
@@ -1090,9 +1125,10 @@ c_common_post_options (const char **pfilename)
 	  /* Only -g0 and -gdwarf* are supported with PCH, for other
 	     debug formats we warn here and refuse to load any PCH files.  */
 	  if (write_symbols != NO_DEBUG && write_symbols != DWARF2_DEBUG)
-	    warning (OPT_Wdeprecated,
-		     "the %qs debug format cannot be used with "
-		     "pre-compiled headers", debug_type_names[write_symbols]);
+	      warning (OPT_Wdeprecated,
+		       "the %qs debug info cannot be used with "
+		       "pre-compiled headers",
+		       debug_set_names (write_symbols & ~DWARF2_DEBUG));
 	}
       else if (write_symbols != NO_DEBUG && write_symbols != DWARF2_DEBUG)
 	c_common_no_more_pch ();
@@ -1101,16 +1137,27 @@ c_common_post_options (const char **pfilename)
       input_location = UNKNOWN_LOCATION;
     }
 
-  cb = cpp_get_callbacks (parse_in);
+  struct cpp_callbacks *cb = cpp_get_callbacks (parse_in);
   cb->file_change = cb_file_change;
   cb->dir_change = cb_dir_change;
+  if (lang_hooks.preprocess_options)
+    lang_hooks.preprocess_options (parse_in);
   cpp_post_options (parse_in);
   init_global_opts_from_cpp (&global_options, cpp_get_options (parse_in));
 
+  /* Let diagnostics infrastructure know how to convert input files the same
+     way libcpp will do it, namely using the configured input charset and
+     skipping a UTF-8 BOM if present.  */
+  diagnostic_initialize_input_context (global_dc,
+				       c_common_input_charset_cb, true);
   input_location = UNKNOWN_LOCATION;
 
   *pfilename = this_input_filename
-    = cpp_read_main_file (parse_in, in_fnames[0]);
+    = cpp_read_main_file (parse_in, in_fnames[0],
+			  /* We'll inject preamble pieces if this is
+			     not preprocessed.  */
+			  !cpp_opts->preprocessed);
+
   /* Don't do any compilation or preprocessing if there is no input file.  */
   if (this_input_filename == NULL)
     {
@@ -1429,6 +1476,7 @@ c_finish_options (void)
 	= linemap_check_ordinary (linemap_add (line_table, LC_RENAME, 0,
 					       _("<built-in>"), 0));
       cb_file_change (parse_in, bltin_map);
+      linemap_line_start (line_table, 0, 1);
 
       /* Make sure all of the builtins about to be declared have
 	 BUILTINS_LOCATION has their location_t.  */
@@ -1452,9 +1500,10 @@ c_finish_options (void)
 	= linemap_check_ordinary (linemap_add (line_table, LC_RENAME, 0,
 					       _("<command-line>"), 0));
       cb_file_change (parse_in, cmd_map);
+      linemap_line_start (line_table, 0, 1);
 
       /* All command line defines must have the same location.  */
-      cpp_force_token_locations (parse_in, cmd_map->start_location);
+      cpp_force_token_locations (parse_in, line_table->highest_line);
       for (size_t i = 0; i < deferred_count; i++)
 	{
 	  struct deferred_opt *opt = &deferred_opts[i];
@@ -1540,7 +1589,13 @@ push_command_line_include (void)
       cpp_opts->warn_unused_macros = cpp_warn_unused_macros;
       /* Restore the line map back to the main file.  */
       if (!cpp_opts->preprocessed)
-	cpp_change_file (parse_in, LC_RENAME, this_input_filename);
+	{
+	  cpp_change_file (parse_in, LC_RENAME, this_input_filename);
+	  if (lang_hooks.preprocess_main_file)
+	    /* We're starting the main file.  Inform the FE of that.  */
+	    lang_hooks.preprocess_main_file
+	      (parse_in, line_table, LINEMAPS_LAST_ORDINARY_MAP (line_table));
+	}
 
       /* Set this here so the client can change the option if it wishes,
 	 and after stacking the main file so we don't trace the main file.  */
@@ -1550,13 +1605,18 @@ push_command_line_include (void)
 
 /* File change callback.  Has to handle -include files.  */
 static void
-cb_file_change (cpp_reader * ARG_UNUSED (pfile),
-		const line_map_ordinary *new_map)
+cb_file_change (cpp_reader *reader, const line_map_ordinary *new_map)
 {
   if (flag_preprocess_only)
     pp_file_change (new_map);
   else
     fe_file_change (new_map);
+
+  if (new_map && cpp_opts->preprocessed
+      && lang_hooks.preprocess_main_file && MAIN_FILE_P (new_map)
+      && ORDINARY_MAP_STARTING_LINE_NUMBER (new_map))
+    /* We're starting the main file.  Inform the FE of that.  */
+    lang_hooks.preprocess_main_file (reader, line_table, new_map);
 
   if (new_map 
       && (new_map->reason == LC_ENTER || new_map->reason == LC_RENAME))
@@ -1729,7 +1789,7 @@ set_std_cxx20 (int iso)
   flag_no_gnu_keywords = iso;
   flag_no_nonansi_builtin = iso;
   flag_iso = iso;
-  /* C++17 includes the C11 standard library.  */
+  /* C++20 includes the C11 standard library.  */
   flag_isoc94 = 1;
   flag_isoc99 = 1;
   flag_isoc11 = 1;
@@ -1737,6 +1797,24 @@ set_std_cxx20 (int iso)
   flag_coroutines = true;
   cxx_dialect = cxx20;
   lang_hooks.name = "GNU C++20";
+}
+
+/* Set the C++ 2023 standard (without GNU extensions if ISO).  */
+static void
+set_std_cxx23 (int iso)
+{
+  cpp_set_lang (parse_in, iso ? CLK_CXX23: CLK_GNUCXX23);
+  flag_no_gnu_keywords = iso;
+  flag_no_nonansi_builtin = iso;
+  flag_iso = iso;
+  /* C++23 includes the C11 standard library.  */
+  flag_isoc94 = 1;
+  flag_isoc99 = 1;
+  flag_isoc11 = 1;
+  /* C++23 includes coroutines.  */
+  flag_coroutines = true;
+  cxx_dialect = cxx23;
+  lang_hooks.name = "GNU C++23";
 }
 
 /* Args to -d specify what to dump.  Silently ignore

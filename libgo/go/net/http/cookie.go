@@ -7,6 +7,8 @@ package http
 import (
 	"log"
 	"net"
+	"net/http/internal/ascii"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -60,11 +62,11 @@ func readSetCookies(h Header) []*Cookie {
 	}
 	cookies := make([]*Cookie, 0, cookieCount)
 	for _, line := range h["Set-Cookie"] {
-		parts := strings.Split(strings.TrimSpace(line), ";")
+		parts := strings.Split(textproto.TrimString(line), ";")
 		if len(parts) == 1 && parts[0] == "" {
 			continue
 		}
-		parts[0] = strings.TrimSpace(parts[0])
+		parts[0] = textproto.TrimString(parts[0])
 		j := strings.Index(parts[0], "=")
 		if j < 0 {
 			continue
@@ -83,7 +85,7 @@ func readSetCookies(h Header) []*Cookie {
 			Raw:   line,
 		}
 		for i := 1; i < len(parts); i++ {
-			parts[i] = strings.TrimSpace(parts[i])
+			parts[i] = textproto.TrimString(parts[i])
 			if len(parts[i]) == 0 {
 				continue
 			}
@@ -92,15 +94,23 @@ func readSetCookies(h Header) []*Cookie {
 			if j := strings.Index(attr, "="); j >= 0 {
 				attr, val = attr[:j], attr[j+1:]
 			}
-			lowerAttr := strings.ToLower(attr)
+			lowerAttr, isASCII := ascii.ToLower(attr)
+			if !isASCII {
+				continue
+			}
 			val, ok = parseCookieValue(val, false)
 			if !ok {
 				c.Unparsed = append(c.Unparsed, parts[i])
 				continue
 			}
+
 			switch lowerAttr {
 			case "samesite":
-				lowerVal := strings.ToLower(val)
+				lowerVal, ascii := ascii.ToLower(val)
+				if !ascii {
+					c.SameSite = SameSiteDefaultMode
+					continue
+				}
 				switch lowerVal {
 				case "lax":
 					c.SameSite = SameSiteLaxMode
@@ -219,7 +229,7 @@ func (c *Cookie) String() string {
 	}
 	switch c.SameSite {
 	case SameSiteDefaultMode:
-		b.WriteString("; SameSite")
+		// Skip, default mode is obtained by not emitting the attribute.
 	case SameSiteNoneMode:
 		b.WriteString("; SameSite=None")
 	case SameSiteLaxMode:
@@ -242,7 +252,7 @@ func readCookies(h Header, filter string) []*Cookie {
 
 	cookies := make([]*Cookie, 0, len(lines)+strings.Count(lines[0], ";"))
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		line = textproto.TrimString(line)
 
 		var part string
 		for len(line) > 0 { // continue since we have rest
@@ -251,7 +261,7 @@ func readCookies(h Header, filter string) []*Cookie {
 			} else {
 				part, line = line, ""
 			}
-			part = strings.TrimSpace(part)
+			part = textproto.TrimString(part)
 			if len(part) == 0 {
 				continue
 			}

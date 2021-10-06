@@ -1,5 +1,5 @@
 /* Perform simple optimizations to clean up the result of reload.
-   Copyright (C) 1987-2020 Free Software Foundation, Inc.
+   Copyright (C) 1987-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -592,6 +592,13 @@ reload_cse_simplify_operands (rtx_insn *insn, rtx testreg)
 	}
     }
 
+  /* The loop below sets alternative_order[0] but -Wmaybe-uninitialized
+     can't know that.  Clear it here to avoid the warning.  */
+  alternative_order[0] = 0;
+  gcc_assert (!recog_data.n_alternatives
+	      || (which_alternative >= 0
+		  && which_alternative < recog_data.n_alternatives));
+
   /* Record all alternatives which are better or equal to the currently
      matching one in the alternative_order array.  */
   for (i = j = 0; i < recog_data.n_alternatives; i++)
@@ -1004,10 +1011,6 @@ reload_combine_recognize_const_pattern (rtx_insn *insn)
 	     it past a real set of this hard reg.  */
 	  if (must_move_add && clobbered_regno >= 0
 	      && reg_state[clobbered_regno].real_store_ruid >= use_ruid)
-	    break;
-
-	  /* Do not separate cc0 setter and cc0 user on HAVE_cc0 targets.  */
-	  if (HAVE_cc0 && must_move_add && sets_cc0_p (PATTERN (use_insn)))
 	    break;
 
 	  gcc_assert (reg_state[regno].store_ruid <= use_ruid);
@@ -1718,7 +1721,8 @@ move2add_valid_value_p (int regno, scalar_int_mode mode)
     {
       scalar_int_mode old_mode;
       if (!is_a <scalar_int_mode> (reg_mode[regno], &old_mode)
-	  || !MODES_OK_FOR_MOVE2ADD (mode, old_mode))
+	  || !MODES_OK_FOR_MOVE2ADD (mode, old_mode)
+	  || !REG_CAN_CHANGE_MODE_P (regno, old_mode, mode))
 	return false;
       /* The value loaded into regno in reg_mode[regno] is also valid in
 	 mode after truncation only if (REG:mode regno) is the lowpart of

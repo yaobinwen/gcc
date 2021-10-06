@@ -1,5 +1,5 @@
 /* Loop distribution.
-   Copyright (C) 2006-2020 Free Software Foundation, Inc.
+   Copyright (C) 2006-2021 Free Software Foundation, Inc.
    Contributed by Georges-Andre Silber <Georges-Andre.Silber@ensmp.fr>
    and Sebastian Pop <sebastian.pop@amd.com>.
 
@@ -115,6 +115,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-vectorizer.h"
 #include "tree-eh.h"
 #include "gimple-fold.h"
+#include "tree-affine.h"
 
 
 #define MAX_DATAREFS_NUM \
@@ -526,7 +527,8 @@ class loop_distribution
 
   /* Build the vertices of the reduced dependence graph RDG.  Return false
      if that failed.  */
-  bool create_rdg_vertices (struct graph *rdg, vec<gimple *> stmts, loop_p loop);
+  bool create_rdg_vertices (struct graph *rdg, const vec<gimple *> &stmts,
+			    loop_p loop);
 
   /* Initialize STMTS with all the statements of LOOP.  We use topological
      order to discover all statements.  The order is important because
@@ -645,7 +647,7 @@ class loop_distribution
      statements from STMTS into separate loops.  Returns the number of
      distributed loops.  Set NB_CALLS to number of generated builtin calls.
      Set *DESTROY_P to whether LOOP needs to be destroyed.  */
-  int distribute_loop (class loop *loop, vec<gimple *> stmts,
+  int distribute_loop (class loop *loop, const vec<gimple *> &stmts,
 		       control_dependences *cd, int *nb_calls, bool *destroy_p,
 		       bool only_patterns_p);
 
@@ -698,7 +700,8 @@ bb_top_order_cmp_r (const void *x, const void *y, void *loop)
 }
 
 bool
-loop_distribution::create_rdg_vertices (struct graph *rdg, vec<gimple *> stmts,
+loop_distribution::create_rdg_vertices (struct graph *rdg,
+					const vec<gimple *> &stmts,
 					loop_p loop)
 {
   int i;
@@ -1212,6 +1215,18 @@ generate_memcpy_builtin (class loop *loop, partition *partition)
     kind = BUILT_IN_MEMCPY;
   else
     kind = BUILT_IN_MEMMOVE;
+  /* Try harder if we're copying a constant size.  */
+  if (kind == BUILT_IN_MEMMOVE && poly_int_tree_p (nb_bytes))
+    {
+      aff_tree asrc, adest;
+      tree_to_aff_combination (src, ptr_type_node, &asrc);
+      tree_to_aff_combination (dest, ptr_type_node, &adest);
+      aff_combination_scale (&adest, -1);
+      aff_combination_add (&asrc, &adest);
+      if (aff_comb_cannot_overlap_p (&asrc, wi::to_poly_widest (nb_bytes),
+				     wi::to_poly_widest (nb_bytes)))
+	kind = BUILT_IN_MEMCPY;
+    }
 
   dest = force_gimple_operand_gsi (&gsi, dest, true, NULL_TREE,
 				   false, GSI_CONTINUE_LINKING);
@@ -1759,11 +1774,11 @@ loop_distribution::classify_builtin_ldst (loop_p loop, struct graph *rdg,
   /* Now check that if there is a dependence.  */
   ddr_p ddr = get_data_dependence (rdg, src_dr, dst_dr);
 
-  /* Classify as memcpy if no dependence between load and store.  */
+  /* Classify as memmove if no dependence between load and store.  */
   if (DDR_ARE_DEPENDENT (ddr) == chrec_known)
     {
       partition->builtin = alloc_builtin (dst_dr, src_dr, base, src_base, size);
-      partition->kind = PKIND_MEMCPY;
+      partition->kind = PKIND_MEMMOVE;
       return;
     }
 
@@ -1940,7 +1955,7 @@ loop_distribution::rdg_build_partitions (struct graph *rdg,
 /* Dump to FILE the PARTITIONS.  */
 
 static void
-dump_rdg_partitions (FILE *file, vec<partition *> partitions)
+dump_rdg_partitions (FILE *file, const vec<partition *> &partitions)
 {
   int i;
   partition *partition;
@@ -1950,10 +1965,10 @@ dump_rdg_partitions (FILE *file, vec<partition *> partitions)
 }
 
 /* Debug PARTITIONS.  */
-extern void debug_rdg_partitions (vec<partition *> );
+extern void debug_rdg_partitions (const vec<partition *> &);
 
 DEBUG_FUNCTION void
-debug_rdg_partitions (vec<partition *> partitions)
+debug_rdg_partitions (const vec<partition *> &partitions)
 {
   dump_rdg_partitions (stderr, partitions);
 }
@@ -2004,7 +2019,7 @@ number_of_rw_in_partition (struct graph *rdg, partition *partition)
 
 static bool
 partition_contains_all_rw (struct graph *rdg,
-			   vec<partition *> partitions)
+			   const vec<partition *> &partitions)
 {
   int i;
   partition *partition;
@@ -2145,6 +2160,8 @@ struct pg_edge_callback_data
   bitmap sccs_to_merge;
   /* Array constains component information for all vertices.  */
   int *vertices_component;
+  /* Array constains postorder information for all vertices.  */
+  int *vertices_post;
   /* Vector to record all data dependence relations which are needed
      to break strong connected components by runtime alias checks.  */
   vec<ddr_p> *alias_ddrs;
@@ -2356,6 +2373,7 @@ loop_distribution::merge_dep_scc_partitions (struct graph *rdg,
   sort_partitions_by_post_order (pg, partitions);
   gcc_assert (partitions->length () == (unsigned)num_sccs);
   free_partition_graph_vdata (pg);
+  for_each_edge (pg, free_partition_graph_edata_cb, NULL);
   free_graph (pg);
 }
 
@@ -2401,7 +2419,7 @@ loop_distribution::break_alias_scc_partitions (struct graph *rdg,
 					       vec<struct partition *> *partitions,
 					       vec<ddr_p> *alias_ddrs)
 {
-  int i, j, k, num_sccs, num_sccs_no_alias;
+  int i, j, k, num_sccs, num_sccs_no_alias = 0;
   /* Build partition dependence graph.  */
   graph *pg = build_partition_graph (rdg, partitions, false);
 
@@ -2452,6 +2470,7 @@ loop_distribution::break_alias_scc_partitions (struct graph *rdg,
       cbdata.sccs_to_merge = sccs_to_merge;
       cbdata.alias_ddrs = alias_ddrs;
       cbdata.vertices_component = XNEWVEC (int, pg->n_vertices);
+      cbdata.vertices_post = XNEWVEC (int, pg->n_vertices);
       /* Record the component information which will be corrupted by next
 	 graph scc finding call.  */
       for (i = 0; i < pg->n_vertices; ++i)
@@ -2460,6 +2479,11 @@ loop_distribution::break_alias_scc_partitions (struct graph *rdg,
       /* Collect data dependences for runtime alias checks to break SCCs.  */
       if (bitmap_count_bits (sccs_to_merge) != (unsigned) num_sccs)
 	{
+	  /* Record the postorder information which will be corrupted by next
+	     graph SCC finding call.  */
+	  for (i = 0; i < pg->n_vertices; ++i)
+	    cbdata.vertices_post[i] = pg->vertices[i].post;
+
 	  /* Run SCC finding algorithm again, with alias dependence edges
 	     skipped.  This is to topologically sort partitions according to
 	     compilation time known dependence.  Note the topological order
@@ -2490,11 +2514,6 @@ loop_distribution::break_alias_scc_partitions (struct graph *rdg,
 	      if (cbdata.vertices_component[k] != i)
 		continue;
 
-	      /* Update to the minimal postordeer number of vertices in scc so
-		 that merged partition is sorted correctly against others.  */
-	      if (pg->vertices[j].post > pg->vertices[k].post)
-		pg->vertices[j].post = pg->vertices[k].post;
-
 	      partition_merge_into (NULL, first, partition, FUSE_SAME_SCC);
 	      (*partitions)[k] = NULL;
 	      partition_free (partition);
@@ -2505,6 +2524,29 @@ loop_distribution::break_alias_scc_partitions (struct graph *rdg,
 	      first->type = PTYPE_SEQUENTIAL;
 	    }
 	}
+      /* Restore the postorder information if it's corrupted in finding SCC
+	 with alias dependence edges skipped.  If reduction partition's SCC is
+	 broken by runtime alias checks, we force a negative post order to it
+	 making sure it will be scheduled in the last.  */
+      if (num_sccs_no_alias > 0)
+	{
+	  j = -1;
+	  for (i = 0; i < pg->n_vertices; ++i)
+	    {
+	      pg->vertices[i].post = cbdata.vertices_post[i];
+	      struct pg_vdata *data = (struct pg_vdata *)pg->vertices[i].data;
+	      if (data->partition && partition_reduction_p (data->partition))
+		{
+		  gcc_assert (j == -1);
+		  j = i;
+		}
+	    }
+	  if (j >= 0)
+	    pg->vertices[j].post = -1;
+	}
+
+      free (cbdata.vertices_component);
+      free (cbdata.vertices_post);
     }
 
   sort_partitions_by_post_order (pg, partitions);
@@ -2881,7 +2923,8 @@ loop_distribution::finalize_partitions (class loop *loop,
    Set *DESTROY_P to whether LOOP needs to be destroyed.  */
 
 int
-loop_distribution::distribute_loop (class loop *loop, vec<gimple *> stmts,
+loop_distribution::distribute_loop (class loop *loop,
+		 const vec<gimple *> &stmts,
 		 control_dependences *cd, int *nb_calls, bool *destroy_p,
 		 bool only_patterns_p)
 {
@@ -3125,11 +3168,19 @@ loop_distribution::distribute_loop (class loop *loop, vec<gimple *> stmts,
 void loop_distribution::bb_top_order_init (void)
 {
   int rpo_num;
-  int *rpo = XNEWVEC (int, last_basic_block_for_fn (cfun));
+  int *rpo = XNEWVEC (int, n_basic_blocks_for_fn (cfun) - NUM_FIXED_BLOCKS);
+  edge entry = single_succ_edge (ENTRY_BLOCK_PTR_FOR_FN (cfun));
+  bitmap exit_bbs = BITMAP_ALLOC (NULL);
 
   bb_top_order_index = XNEWVEC (int, last_basic_block_for_fn (cfun));
   bb_top_order_index_size = last_basic_block_for_fn (cfun);
-  rpo_num = pre_and_rev_post_order_compute_fn (cfun, NULL, rpo, true);
+
+  entry->flags &= ~EDGE_DFS_BACK;
+  bitmap_set_bit (exit_bbs, EXIT_BLOCK);
+  rpo_num = rev_post_order_and_mark_dfs_back_seme (cfun, entry, exit_bbs, true,
+						   rpo, NULL);
+  BITMAP_FREE (exit_bbs);
+
   for (int i = 0; i < rpo_num; i++)
     bb_top_order_index[rpo[i]] = i;
 
@@ -3155,6 +3206,16 @@ find_seed_stmts_for_distribution (class loop *loop, vec<gimple *> *work_list)
   /* Initialize the worklist with stmts we seed the partitions with.  */
   for (unsigned i = 0; i < loop->num_nodes; ++i)
     {
+      /* In irreducible sub-regions we don't know how to redirect
+	 conditions, so fail.  See PR100492.  */
+      if (bbs[i]->flags & BB_IRREDUCIBLE_LOOP)
+	{
+	  if (dump_file && (dump_flags & TDF_DETAILS))
+	    fprintf (dump_file, "loop %d contains an irreducible region.\n",
+		     loop->num);
+	  work_list->truncate (0);
+	  break;
+	}
       for (gphi_iterator gsi = gsi_start_phis (bbs[i]);
 	   !gsi_end_p (gsi); gsi_next (&gsi))
 	{
@@ -3254,7 +3315,7 @@ loop_distribution::execute (function *fun)
 
   /* We can at the moment only distribute non-nested loops, thus restrict
      walking to innermost loops.  */
-  FOR_EACH_LOOP (loop, LI_ONLY_INNERMOST)
+  for (auto loop : loops_list (cfun, LI_ONLY_INNERMOST))
     {
       /* Don't distribute multiple exit edges loop, or cold loop when
          not doing pattern detection.  */

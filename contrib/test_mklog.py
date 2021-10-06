@@ -30,6 +30,11 @@ import unittest
 
 from mklog import generate_changelog
 
+import unidiff
+
+unidiff_supports_renaming = hasattr(unidiff.PatchedFile(), 'is_rename')
+
+
 PATCH1 = '''\
 diff --git a/gcc/config/riscv/riscv.h b/gcc/config/riscv/riscv.h
 index 567c23380fe..e6209ede9d6 100644
@@ -235,6 +240,9 @@ index 4ad78c1f77b..6687b368038 100644
 '''
 
 EXPECTED4 = '''\
+
+	PR 50209
+
 gcc/ChangeLog:
 
 	* ipa-icf.c:
@@ -312,9 +320,10 @@ index 00000000000..dcc8999c446
 EXPECTED5 = '''\
 PR target/95046 - Vectorize V2SFmode operations
 
+	PR target/95046
+
 gcc/testsuite/ChangeLog:
 
-	PR target/95046
 	* gcc.target/i386/pr95046-6.c: New test.
 
 '''
@@ -372,10 +381,86 @@ index 00000000000..f3d6d11e61e
 '''
 
 EXPECTED7 = '''\
-gcc/testsuite/ChangeLog:
 
 	DR 2237
+
+gcc/testsuite/ChangeLog:
+
 	* g++.dg/DRs/dr2237.C: New test.
+
+'''
+
+PATCH8 = '''\
+diff --git a/gcc/ipa-icf.c b/gcc/ipa-icf2.c
+similarity index 100%
+rename from gcc/ipa-icf.c
+rename to gcc/ipa-icf2.c
+'''
+
+EXPECTED8 = '''\
+gcc/ChangeLog:
+
+	* ipa-icf.c: Moved to...
+	* ipa-icf2.c: ...here.
+
+'''
+
+PATCH9 = '''\
+diff --git a/gcc/config/i386/sse.md b/gcc/config/i386/sse.md
+index 2a260c1cfbd..7f03fc491c3 100644
+--- a/gcc/config/i386/sse.md
++++ b/gcc/config/i386/sse.md
+@@ -17611,6 +17611,23 @@ (define_insn "avx2_<code>v16qiv16hi2<mask_name>"
+    (set_attr "prefix" "maybe_evex")
+    (set_attr "mode" "OI")])
+ 
++(define_insn_and_split "*avx2_zero_extendv16qiv16hi2_1"
++  [(set (match_operand:V32QI 0 "register_operand" "=v")
++	(vec_select:V32QI
++	  (vec_concat:V64QI
++	    (match_operand:V32QI 1 "nonimmediate_operand" "vm")
++	    (match_operand:V32QI 2 "const0_operand" "C"))
++	  (match_parallel 3 "pmovzx_parallel"
++	    [(match_operand 4 "const_int_operand" "n")])))]
++  "TARGET_AVX2"
++  "#"
++  "&& reload_completed"
++  [(set (match_dup 0) (zero_extend:V16HI (match_dup 1)))]
++{
++  operands[0] = lowpart_subreg (V16HImode, operands[0], V32QImode);
++  operands[1] = lowpart_subreg (V16QImode, operands[1], V32QImode);
++})
++
+ (define_expand "<insn>v16qiv16hi2"
+   [(set (match_operand:V16HI 0 "register_operand")
+ 	(any_extend:V16HI
+'''
+
+EXPECTED9 = '''\
+gcc/ChangeLog:
+
+	* config/i386/sse.md (*avx2_zero_extendv16qiv16hi2_1):
+
+'''
+
+PATCH10 = '''\
+diff --git a/libgomp/doc/the-libgomp-abi/implementing-firstprivate-lastprivate-copyin-and-copyprivate-clauses.rst b/libgomp/doc/the-libgomp-abi/implementing-firstprivate-lastprivate-copyin-and-copyprivate-clauses.rst
+new file mode 100644
+index 00000000000..ad3c6d856fc
+--- /dev/null
++++ b/libgomp/doc/the-libgomp-abi/implementing-firstprivate-lastprivate-copyin-and-copyprivate-clauses.rst
+@@ -0,0 +1,3 @@
++
++
++
+
+'''
+
+EXPECTED10 = '''\
+libgomp/ChangeLog:
+
+	* doc/the-libgomp-abi/implementing-firstprivate-lastprivate-copyin-and-copyprivate-clauses.rst:
+	New file.
 
 '''
 
@@ -411,3 +496,17 @@ class TestMklog(unittest.TestCase):
     def test_dr_detection_in_test_case(self):
         changelog = generate_changelog(PATCH7)
         assert changelog == EXPECTED7
+
+    @unittest.skipIf(not unidiff_supports_renaming,
+                     'Newer version of unidiff is needed (0.6.0+)')
+    def test_renaming(self):
+        changelog = generate_changelog(PATCH8)
+        assert changelog == EXPECTED8
+
+    def test_define_macro_parsing(self):
+        changelog = generate_changelog(PATCH9)
+        assert changelog == EXPECTED9
+
+    def test_long_filenames(self):
+        changelog = generate_changelog(PATCH10)
+        assert changelog == EXPECTED10

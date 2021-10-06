@@ -1,4 +1,4 @@
-/* Copyright (C) 1988-2020 Free Software Foundation, Inc.
+/* Copyright (C) 1988-2021 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -544,70 +544,111 @@ general_scalar_chain::compute_convert_gain ()
 	  += m * ix86_cost->int_store[2] - ix86_cost->sse_store[sse_cost_idx];
       else if (MEM_P (src) && REG_P (dst))
 	igain += m * ix86_cost->int_load[2] - ix86_cost->sse_load[sse_cost_idx];
-      else if (GET_CODE (src) == ASHIFT
-	       || GET_CODE (src) == ASHIFTRT
-	       || GET_CODE (src) == LSHIFTRT)
-	{
-	  if (m == 2)
-	    {
-	      if (INTVAL (XEXP (src, 1)) >= 32)
-		igain += ix86_cost->add;
-	      else
-		igain += ix86_cost->shift_const;
-	    }
-
-	  igain += ix86_cost->shift_const - ix86_cost->sse_op;
-
-	  if (CONST_INT_P (XEXP (src, 0)))
-	    igain -= vector_const_cost (XEXP (src, 0));
-	}
-      else if (GET_CODE (src) == PLUS
-	       || GET_CODE (src) == MINUS
-	       || GET_CODE (src) == IOR
-	       || GET_CODE (src) == XOR
-	       || GET_CODE (src) == AND)
-	{
-	  igain += m * ix86_cost->add - ix86_cost->sse_op;
-	  /* Additional gain for andnot for targets without BMI.  */
-	  if (GET_CODE (XEXP (src, 0)) == NOT
-	      && !TARGET_BMI)
-	    igain += m * ix86_cost->add;
-
-	  if (CONST_INT_P (XEXP (src, 0)))
-	    igain -= vector_const_cost (XEXP (src, 0));
-	  if (CONST_INT_P (XEXP (src, 1)))
-	    igain -= vector_const_cost (XEXP (src, 1));
-	}
-      else if (GET_CODE (src) == NEG
-	       || GET_CODE (src) == NOT)
-	igain += m * ix86_cost->add - ix86_cost->sse_op - COSTS_N_INSNS (1);
-      else if (GET_CODE (src) == SMAX
-	       || GET_CODE (src) == SMIN
-	       || GET_CODE (src) == UMAX
-	       || GET_CODE (src) == UMIN)
-	{
-	  /* We do not have any conditional move cost, estimate it as a
-	     reg-reg move.  Comparisons are costed as adds.  */
-	  igain += m * (COSTS_N_INSNS (2) + ix86_cost->add);
-	  /* Integer SSE ops are all costed the same.  */
-	  igain -= ix86_cost->sse_op;
-	}
-      else if (GET_CODE (src) == COMPARE)
-	{
-	  /* Assume comparison cost is the same.  */
-	}
-      else if (CONST_INT_P (src))
-	{
-	  if (REG_P (dst))
-	    /* DImode can be immediate for TARGET_64BIT and SImode always.  */
-	    igain += m * COSTS_N_INSNS (1);
-	  else if (MEM_P (dst))
-	    igain += (m * ix86_cost->int_store[2]
-		     - ix86_cost->sse_store[sse_cost_idx]);
-	  igain -= vector_const_cost (src);
-	}
       else
-	gcc_unreachable ();
+	switch (GET_CODE (src))
+	  {
+	  case ASHIFT:
+	  case ASHIFTRT:
+	  case LSHIFTRT:
+	    if (m == 2)
+	      {
+		if (INTVAL (XEXP (src, 1)) >= 32)
+		  igain += ix86_cost->add;
+		else
+		  igain += ix86_cost->shift_const;
+	      }
+
+	    igain += ix86_cost->shift_const - ix86_cost->sse_op;
+
+	    if (CONST_INT_P (XEXP (src, 0)))
+	      igain -= vector_const_cost (XEXP (src, 0));
+	    break;
+
+	  case AND:
+	  case IOR:
+	  case XOR:
+	  case PLUS:
+	  case MINUS:
+	    igain += m * ix86_cost->add - ix86_cost->sse_op;
+	    /* Additional gain for andnot for targets without BMI.  */
+	    if (GET_CODE (XEXP (src, 0)) == NOT
+		&& !TARGET_BMI)
+	      igain += m * ix86_cost->add;
+
+	    if (CONST_INT_P (XEXP (src, 0)))
+	      igain -= vector_const_cost (XEXP (src, 0));
+	    if (CONST_INT_P (XEXP (src, 1)))
+	      igain -= vector_const_cost (XEXP (src, 1));
+	    break;
+
+	  case NEG:
+	  case NOT:
+	    igain -= ix86_cost->sse_op + COSTS_N_INSNS (1);
+
+	    if (GET_CODE (XEXP (src, 0)) != ABS)
+	      {
+		igain += m * ix86_cost->add;
+		break;
+	      }
+	    /* FALLTHRU */
+
+	  case ABS:
+	  case SMAX:
+	  case SMIN:
+	  case UMAX:
+	  case UMIN:
+	    /* We do not have any conditional move cost, estimate it as a
+	       reg-reg move.  Comparisons are costed as adds.  */
+	    igain += m * (COSTS_N_INSNS (2) + ix86_cost->add);
+	    /* Integer SSE ops are all costed the same.  */
+	    igain -= ix86_cost->sse_op;
+	    break;
+
+	  case COMPARE:
+	    /* Assume comparison cost is the same.  */
+	    break;
+
+	  case CONST_INT:
+	    if (REG_P (dst))
+	      {
+		if (optimize_insn_for_size_p ())
+		  {
+		    /* xor (2 bytes) vs. xorps (3 bytes).  */
+		    if (src == const0_rtx)
+		      igain -= COSTS_N_BYTES (1);
+		    /* movdi_internal vs. movv2di_internal.  */
+		    /* => mov (5 bytes) vs. movaps (7 bytes).  */
+		    else if (x86_64_immediate_operand (src, SImode))
+		      igain -= COSTS_N_BYTES (2);
+		    else
+		      /* ??? Larger immediate constants are placed in the
+			 constant pool, where the size benefit/impact of
+			 STV conversion is affected by whether and how
+			 often each constant pool entry is shared/reused.
+			 The value below is empirically derived from the
+			 CSiBE benchmark (and the optimal value may drift
+			 over time).  */
+		      igain += COSTS_N_BYTES (0);
+		  }
+		else
+		  {
+		    /* DImode can be immediate for TARGET_64BIT
+		       and SImode always.  */
+		    igain += m * COSTS_N_INSNS (1);
+		    igain -= vector_const_cost (src);
+		  }
+	      }
+	    else if (MEM_P (dst))
+	      {
+		igain += (m * ix86_cost->int_store[2]
+			  - ix86_cost->sse_store[sse_cost_idx]);
+		igain -= vector_const_cost (src);
+	      }
+	    break;
+
+	  default:
+	    gcc_unreachable ();
+	  }
 
       if (igain != 0 && dump_file)
 	{
@@ -986,13 +1027,6 @@ general_scalar_chain::convert_insn (rtx_insn *insn)
 
   switch (GET_CODE (src))
     {
-    case ASHIFT:
-    case ASHIFTRT:
-    case LSHIFTRT:
-      convert_op (&XEXP (src, 0), insn);
-      PUT_MODE (src, vmode);
-      break;
-
     case PLUS:
     case MINUS:
     case IOR:
@@ -1002,14 +1036,32 @@ general_scalar_chain::convert_insn (rtx_insn *insn)
     case SMIN:
     case UMAX:
     case UMIN:
-      convert_op (&XEXP (src, 0), insn);
       convert_op (&XEXP (src, 1), insn);
+      /* FALLTHRU */
+
+    case ABS:
+    case ASHIFT:
+    case ASHIFTRT:
+    case LSHIFTRT:
+      convert_op (&XEXP (src, 0), insn);
       PUT_MODE (src, vmode);
       break;
 
     case NEG:
       src = XEXP (src, 0);
-      convert_op (&src, insn);
+
+      if (GET_CODE (src) == ABS)
+	{
+	  src = XEXP (src, 0);
+	  convert_op (&src, insn);
+	  subreg = gen_reg_rtx (vmode);
+	  emit_insn_before (gen_rtx_SET (subreg,
+					 gen_rtx_ABS (vmode, src)), insn);
+	  src = subreg;
+	}
+      else
+	convert_op (&src, insn);
+
       subreg = gen_reg_rtx (vmode);
       emit_insn_before (gen_move_insn (subreg, CONST0_RTX (vmode)), insn);
       src = gen_rtx_MINUS (vmode, subreg, src);
@@ -1042,9 +1094,10 @@ general_scalar_chain::convert_insn (rtx_insn *insn)
 
       gcc_assert (REG_P (src) && GET_MODE (src) == DImode);
       subreg = gen_rtx_SUBREG (V2DImode, src, 0);
-      emit_insn_before (gen_vec_interleave_lowv2di (copy_rtx_if_shared (subreg),
-						    copy_rtx_if_shared (subreg),
-						    copy_rtx_if_shared (subreg)),
+      emit_insn_before (gen_vec_interleave_lowv2di
+			(copy_rtx_if_shared (subreg),
+			 copy_rtx_if_shared (subreg),
+			 copy_rtx_if_shared (subreg)),
 			insn);
       dst = gen_rtx_REG (CCmode, FLAGS_REG);
       src = gen_rtx_UNSPEC (CCmode, gen_rtvec (2, copy_rtx_if_shared (subreg),
@@ -1266,9 +1319,10 @@ pseudo_reg_set (rtx_insn *insn)
     return NULL;
 
   /* Check pseudo register push first. */
+  machine_mode mode = TARGET_64BIT ? TImode : DImode;
   if (REG_P (SET_SRC (set))
       && !HARD_REGISTER_P (SET_SRC (set))
-      && push_operand (SET_DEST (set), GET_MODE (SET_DEST (set))))
+      && push_operand (SET_DEST (set), mode))
     return set;
 
   df_ref ref;
@@ -1399,11 +1453,11 @@ general_scalar_to_vector_candidate_p (rtx_insn *insn, enum machine_mode mode)
 	return false;
       /* Fallthru.  */
 
-    case PLUS:
-    case MINUS:
+    case AND:
     case IOR:
     case XOR:
-    case AND:
+    case PLUS:
+    case MINUS:
       if (!REG_P (XEXP (src, 1))
 	  && !MEM_P (XEXP (src, 1))
 	  && !CONST_INT_P (XEXP (src, 1)))
@@ -1412,10 +1466,30 @@ general_scalar_to_vector_candidate_p (rtx_insn *insn, enum machine_mode mode)
       if (GET_MODE (XEXP (src, 1)) != mode
 	  && !CONST_INT_P (XEXP (src, 1)))
 	return false;
+
+      /* Check for andnot case.  */
+      if (GET_CODE (src) != AND
+	  || GET_CODE (XEXP (src, 0)) != NOT)
+	break;
+
+      src = XEXP (src, 0);
+      /* FALLTHRU */
+
+    case NOT:
       break;
 
     case NEG:
-    case NOT:
+      /* Check for nabs case.  */
+      if (GET_CODE (XEXP (src, 0)) != ABS)
+	break;
+
+      src = XEXP (src, 0);
+      /* FALLTHRU */
+
+    case ABS:
+      if ((mode == DImode && !TARGET_AVX512VL)
+	  || (mode == SImode && !TARGET_SSSE3))
+	return false;
       break;
 
     case REG:
@@ -1431,12 +1505,8 @@ general_scalar_to_vector_candidate_p (rtx_insn *insn, enum machine_mode mode)
 
   if (!REG_P (XEXP (src, 0))
       && !MEM_P (XEXP (src, 0))
-      && !CONST_INT_P (XEXP (src, 0))
-      /* Check for andnot case.  */
-      && (GET_CODE (src) != AND
-	  || GET_CODE (XEXP (src, 0)) != NOT
-	  || !REG_P (XEXP (XEXP (src, 0), 0))))
-      return false;
+      && !CONST_INT_P (XEXP (src, 0)))
+    return false;
 
   if (GET_MODE (XEXP (src, 0)) != mode
       && !CONST_INT_P (XEXP (src, 0)))
@@ -1620,7 +1690,7 @@ convert_scalars_to_vector (bool timode_p)
     bitmap_initialize (&candidates[i], &bitmap_default_obstack);
 
   calculate_dominance_info (CDI_DOMINATORS);
-  df_set_flags (DF_DEFER_INSN_RESCAN);
+  df_set_flags (DF_DEFER_INSN_RESCAN | DF_RD_PRUNE_DEAD_DEFS);
   df_chain_add_problem (DF_DU_CHAIN | DF_UD_CHAIN);
   df_analyze ();
 
@@ -1761,89 +1831,22 @@ convert_scalars_to_vector (bool timode_p)
   return 0;
 }
 
-/* Modify the vzeroupper pattern in INSN so that it describes the effect
-   that the instruction has on the SSE registers.  LIVE_REGS are the set
-   of registers that are live across the instruction.
-
-   For a live register R we use:
-
-     (set (reg:V2DF R) (reg:V2DF R))
-
-   which preserves the low 128 bits but clobbers the upper bits.  */
-
-static void
-ix86_add_reg_usage_to_vzeroupper (rtx_insn *insn, bitmap live_regs)
-{
-  rtx pattern = PATTERN (insn);
-  unsigned int nregs = TARGET_64BIT ? 16 : 8;
-  unsigned int npats = nregs;
-  for (unsigned int i = 0; i < nregs; ++i)
-    {
-      unsigned int regno = GET_SSE_REGNO (i);
-      if (!bitmap_bit_p (live_regs, regno))
-	npats--;
-    }
-  if (npats == 0)
-    return;
-  rtvec vec = rtvec_alloc (npats + 1);
-  RTVEC_ELT (vec, 0) = XVECEXP (pattern, 0, 0);
-  for (unsigned int i = 0, j = 0; i < nregs; ++i)
-    {
-      unsigned int regno = GET_SSE_REGNO (i);
-      if (!bitmap_bit_p (live_regs, regno))
-	continue;
-      rtx reg = gen_rtx_REG (V2DImode, regno);
-      ++j;
-      RTVEC_ELT (vec, j) = gen_rtx_SET (reg, reg);
-    }
-  XVEC (pattern, 0) = vec;
-  INSN_CODE (insn) = -1;
-  df_insn_rescan (insn);
-}
-
-/* Walk the vzeroupper instructions in the function and annotate them
-   with the effect that they have on the SSE registers.  */
-
-static void
-ix86_add_reg_usage_to_vzerouppers (void)
-{
-  basic_block bb;
-  rtx_insn *insn;
-  auto_bitmap live_regs;
-
-  df_analyze ();
-  FOR_EACH_BB_FN (bb, cfun)
-    {
-      bitmap_copy (live_regs, df_get_live_out (bb));
-      df_simulate_initialize_backwards (bb, live_regs);
-      FOR_BB_INSNS_REVERSE (bb, insn)
-	{
-	  if (!NONDEBUG_INSN_P (insn))
-	    continue;
-	  if (vzeroupper_pattern (PATTERN (insn), VOIDmode))
-	    ix86_add_reg_usage_to_vzeroupper (insn, live_regs);
-	  df_simulate_one_insn_backwards (bb, insn, live_regs);
-	}
-    }
-}
-
 static unsigned int
 rest_of_handle_insert_vzeroupper (void)
 {
-  int i;
-
   /* vzeroupper instructions are inserted immediately after reload to
      account for possible spills from 256bit or 512bit registers.  The pass
      reuses mode switching infrastructure by re-running mode insertion
      pass, so disable entities that have already been processed.  */
-  for (i = 0; i < MAX_386_ENTITIES; i++)
+  for (int i = 0; i < MAX_386_ENTITIES; i++)
     ix86_optimize_mode_switching[i] = 0;
 
   ix86_optimize_mode_switching[AVX_U128] = 1;
 
   /* Call optimize_mode_switching.  */
   g->get_passes ()->execute_pass_mode_switching ();
-  ix86_add_reg_usage_to_vzerouppers ();
+
+  df_analyze ();
   return 0;
 }
 
@@ -1872,9 +1875,8 @@ public:
   /* opt_pass methods: */
   virtual bool gate (function *)
     {
-      return TARGET_AVX
-	     && TARGET_VZEROUPPER && flag_expensive_optimizations
-	     && !optimize_size;
+      return TARGET_AVX && TARGET_VZEROUPPER
+	&& flag_expensive_optimizations && !optimize_size;
     }
 
   virtual unsigned int execute (function *)
@@ -1946,47 +1948,82 @@ make_pass_stv (gcc::context *ctxt)
   return new pass_stv (ctxt);
 }
 
-/* Inserting ENDBRANCH instructions.  */
+/* Inserting ENDBR and pseudo patchable-area instructions.  */
 
-static unsigned int
-rest_of_insert_endbranch (void)
+static void
+rest_of_insert_endbr_and_patchable_area (bool need_endbr,
+					 unsigned int patchable_area_size)
 {
-  timevar_push (TV_MACH_DEP);
-
-  rtx cet_eb;
+  rtx endbr;
   rtx_insn *insn;
+  rtx_insn *endbr_insn = NULL;
   basic_block bb;
 
-  /* Currently emit EB if it's a tracking function, i.e. 'nocf_check' is
-     absent among function attributes.  Later an optimization will be
-     introduced to make analysis if an address of a static function is
-     taken.  A static function whose address is not taken will get a
-     nocf_check attribute.  This will allow to reduce the number of EB.  */
-
-  if (!lookup_attribute ("nocf_check",
-			 TYPE_ATTRIBUTES (TREE_TYPE (cfun->decl)))
-      && (!flag_manual_endbr
-	  || lookup_attribute ("cf_check",
-			       DECL_ATTRIBUTES (cfun->decl)))
-      && (!cgraph_node::get (cfun->decl)->only_called_directly_p ()
-	  || ix86_cmodel == CM_LARGE
-	  || ix86_cmodel == CM_LARGE_PIC
-	  || flag_force_indirect_call
-	  || (TARGET_DLLIMPORT_DECL_ATTRIBUTES
-	      && DECL_DLLIMPORT_P (cfun->decl))))
+  if (need_endbr)
     {
-      /* Queue ENDBR insertion to x86_function_profiler.  */
-      if (crtl->profile && flag_fentry)
-	cfun->machine->endbr_queued_at_entrance = true;
-      else
+      /* Currently emit EB if it's a tracking function, i.e. 'nocf_check'
+	 is absent among function attributes.  Later an optimization will
+	 be introduced to make analysis if an address of a static function
+	 is taken.  A static function whose address is not taken will get
+	 a nocf_check attribute.  This will allow to reduce the number of
+	 EB.  */
+      if (!lookup_attribute ("nocf_check",
+			     TYPE_ATTRIBUTES (TREE_TYPE (cfun->decl)))
+	  && (!flag_manual_endbr
+	      || lookup_attribute ("cf_check",
+				   DECL_ATTRIBUTES (cfun->decl)))
+	  && (!cgraph_node::get (cfun->decl)->only_called_directly_p ()
+	      || ix86_cmodel == CM_LARGE
+	      || ix86_cmodel == CM_LARGE_PIC
+	      || flag_force_indirect_call
+	      || (TARGET_DLLIMPORT_DECL_ATTRIBUTES
+		  && DECL_DLLIMPORT_P (cfun->decl))))
 	{
-	  cet_eb = gen_nop_endbr ();
-
-	  bb = ENTRY_BLOCK_PTR_FOR_FN (cfun)->next_bb;
-	  insn = BB_HEAD (bb);
-	  emit_insn_before (cet_eb, insn);
+	  if (crtl->profile && flag_fentry)
+	    {
+	      /* Queue ENDBR insertion to x86_function_profiler.
+		 NB: Any patchable-area insn will be inserted after
+		 ENDBR.  */
+	      cfun->machine->insn_queued_at_entrance = TYPE_ENDBR;
+	    }
+	  else
+	    {
+	      endbr = gen_nop_endbr ();
+	      bb = ENTRY_BLOCK_PTR_FOR_FN (cfun)->next_bb;
+	      rtx_insn *insn = BB_HEAD (bb);
+	      endbr_insn = emit_insn_before (endbr, insn);
+	    }
 	}
     }
+
+  if (patchable_area_size)
+    {
+      if (crtl->profile && flag_fentry)
+	{
+	  /* Queue patchable-area insertion to x86_function_profiler.
+	     NB: If there is a queued ENDBR, x86_function_profiler
+	     will also handle patchable-area.  */
+	  if (!cfun->machine->insn_queued_at_entrance)
+	    cfun->machine->insn_queued_at_entrance = TYPE_PATCHABLE_AREA;
+	}
+      else
+	{
+	  rtx patchable_area
+	    = gen_patchable_area (GEN_INT (patchable_area_size),
+				  GEN_INT (crtl->patch_area_entry == 0));
+	  if (endbr_insn)
+	    emit_insn_after (patchable_area, endbr_insn);
+	  else
+	    {
+	      bb = ENTRY_BLOCK_PTR_FOR_FN (cfun)->next_bb;
+	      insn = BB_HEAD (bb);
+	      emit_insn_before (patchable_area, insn);
+	    }
+	}
+    }
+
+  if (!need_endbr)
+    return;
 
   bb = 0;
   FOR_EACH_BB_FN (bb, cfun)
@@ -1996,7 +2033,6 @@ rest_of_insert_endbranch (void)
 	{
 	  if (CALL_P (insn))
 	    {
-	      bool need_endbr;
 	      need_endbr = find_reg_note (insn, REG_SETJMP, NULL) != NULL;
 	      if (!need_endbr && !SIBLING_CALL_P (insn))
 		{
@@ -2027,8 +2063,8 @@ rest_of_insert_endbranch (void)
 	      /* Generate ENDBRANCH after CALL, which can return more than
 		 twice, setjmp-like functions.  */
 
-	      cet_eb = gen_nop_endbr ();
-	      emit_insn_after_setloc (cet_eb, insn, INSN_LOCATION (insn));
+	      endbr = gen_nop_endbr ();
+	      emit_insn_after_setloc (endbr, insn, INSN_LOCATION (insn));
 	      continue;
 	    }
 
@@ -2058,31 +2094,30 @@ rest_of_insert_endbranch (void)
 		  dest_blk = e->dest;
 		  insn = BB_HEAD (dest_blk);
 		  gcc_assert (LABEL_P (insn));
-		  cet_eb = gen_nop_endbr ();
-		  emit_insn_after (cet_eb, insn);
+		  endbr = gen_nop_endbr ();
+		  emit_insn_after (endbr, insn);
 		}
 	      continue;
 	    }
 
 	  if (LABEL_P (insn) && LABEL_PRESERVE_P (insn))
 	    {
-	      cet_eb = gen_nop_endbr ();
-	      emit_insn_after (cet_eb, insn);
+	      endbr = gen_nop_endbr ();
+	      emit_insn_after (endbr, insn);
 	      continue;
 	    }
 	}
     }
 
-  timevar_pop (TV_MACH_DEP);
-  return 0;
+  return;
 }
 
 namespace {
 
-const pass_data pass_data_insert_endbranch =
+const pass_data pass_data_insert_endbr_and_patchable_area =
 {
   RTL_PASS, /* type.  */
-  "cet", /* name.  */
+  "endbr_and_patchable_area", /* name.  */
   OPTGROUP_NONE, /* optinfo_flags.  */
   TV_MACH_DEP, /* tv_id.  */
   0, /* properties_required.  */
@@ -2092,36 +2127,45 @@ const pass_data pass_data_insert_endbranch =
   0, /* todo_flags_finish.  */
 };
 
-class pass_insert_endbranch : public rtl_opt_pass
+class pass_insert_endbr_and_patchable_area : public rtl_opt_pass
 {
 public:
-  pass_insert_endbranch (gcc::context *ctxt)
-    : rtl_opt_pass (pass_data_insert_endbranch, ctxt)
+  pass_insert_endbr_and_patchable_area (gcc::context *ctxt)
+    : rtl_opt_pass (pass_data_insert_endbr_and_patchable_area, ctxt)
   {}
 
   /* opt_pass methods: */
   virtual bool gate (function *)
     {
-      return ((flag_cf_protection & CF_BRANCH));
+      need_endbr = (flag_cf_protection & CF_BRANCH) != 0;
+      patchable_area_size = crtl->patch_area_size - crtl->patch_area_entry;
+      return need_endbr || patchable_area_size;
     }
 
   virtual unsigned int execute (function *)
     {
-      return rest_of_insert_endbranch ();
+      timevar_push (TV_MACH_DEP);
+      rest_of_insert_endbr_and_patchable_area (need_endbr,
+					       patchable_area_size);
+      timevar_pop (TV_MACH_DEP);
+      return 0;
     }
 
-}; // class pass_insert_endbranch
+private:
+  bool need_endbr;
+  unsigned int patchable_area_size;
+}; // class pass_insert_endbr_and_patchable_area
 
 } // anon namespace
 
 rtl_opt_pass *
-make_pass_insert_endbranch (gcc::context *ctxt)
+make_pass_insert_endbr_and_patchable_area (gcc::context *ctxt)
 {
-  return new pass_insert_endbranch (ctxt);
+  return new pass_insert_endbr_and_patchable_area (ctxt);
 }
 
 /* At entry of the nearest common dominator for basic blocks with
-   conversions, generate a single
+   conversions/rcp/sqrt/rsqrt/round, generate a single
 	vxorps %xmmN, %xmmN, %xmmN
    for all
 	vcvtss2sd  op, %xmmN, %xmmX
@@ -2148,6 +2192,9 @@ remove_partial_avx_dependency (void)
 
   auto_vec<rtx_insn *> control_flow_insns;
 
+  /* We create invalid RTL initially so defer rescans.  */
+  df_set_flags (DF_DEFER_INSN_RESCAN);
+
   FOR_EACH_BB_FN (bb, cfun)
     {
       FOR_BB_INSNS (bb, insn)
@@ -2163,34 +2210,70 @@ remove_partial_avx_dependency (void)
 	      != AVX_PARTIAL_XMM_UPDATE_TRUE)
 	    continue;
 
-	  if (!v4sf_const0)
-	    {
-	      calculate_dominance_info (CDI_DOMINATORS);
-	      df_set_flags (DF_DEFER_INSN_RESCAN);
-	      df_chain_add_problem (DF_DU_CHAIN | DF_UD_CHAIN);
-	      df_md_add_problem ();
-	      df_analyze ();
-	      v4sf_const0 = gen_reg_rtx (V4SFmode);
-	    }
-
 	  /* Convert PARTIAL_XMM_UPDATE_TRUE insns, DF -> SF, SF -> DF,
-	     SI -> SF, SI -> DF, DI -> SF, DI -> DF, to vec_dup and
-	     vec_merge with subreg.  */
+	     SI -> SF, SI -> DF, DI -> SF, DI -> DF, sqrt, rsqrt, rcp,
+	     round, to vec_dup and vec_merge with subreg.  */
 	  rtx src = SET_SRC (set);
 	  rtx dest = SET_DEST (set);
 	  machine_mode dest_mode = GET_MODE (dest);
+	  bool convert_p = false;
+	  switch (GET_CODE (src))
+	    {
+	    case FLOAT:
+	    case FLOAT_EXTEND:
+	    case FLOAT_TRUNCATE:
+	    case UNSIGNED_FLOAT:
+	      convert_p = true;
+	      break;
+	    default:
+	      break;
+	    }
+
+	  /* Only hanlde conversion here.  */
+	  machine_mode src_mode
+	    = convert_p ? GET_MODE (XEXP (src, 0)) : VOIDmode;
+	  switch (src_mode)
+	    {
+	    case E_SFmode:
+	    case E_DFmode:
+	      if (TARGET_USE_VECTOR_FP_CONVERTS
+		  || !TARGET_SSE_PARTIAL_REG_FP_CONVERTS_DEPENDENCY)
+		continue;
+	      break;
+	    case E_SImode:
+	    case E_DImode:
+	      if (TARGET_USE_VECTOR_CONVERTS
+		  || !TARGET_SSE_PARTIAL_REG_CONVERTS_DEPENDENCY)
+		continue;
+	      break;
+	    case E_VOIDmode:
+	      gcc_assert (!convert_p);
+	      break;
+	    default:
+	      gcc_unreachable ();
+	    }
+
+	  if (!v4sf_const0)
+	    v4sf_const0 = gen_reg_rtx (V4SFmode);
 
 	  rtx zero;
 	  machine_mode dest_vecmode;
-	  if (dest_mode == E_SFmode)
+	  switch (dest_mode)
 	    {
+	    case E_HFmode:
+	      dest_vecmode = V8HFmode;
+	      zero = gen_rtx_SUBREG (V8HFmode, v4sf_const0, 0);
+	      break;
+	    case E_SFmode:
 	      dest_vecmode = V4SFmode;
 	      zero = v4sf_const0;
-	    }
-	  else
-	    {
+	      break;
+	    case E_DFmode:
 	      dest_vecmode = V2DFmode;
 	      zero = gen_rtx_SUBREG (V2DFmode, v4sf_const0, 0);
+	      break;
+	    default:
+	      gcc_unreachable ();
 	    }
 
 	  /* Change source to vector mode.  */
@@ -2232,6 +2315,7 @@ remove_partial_avx_dependency (void)
     {
       /* (Re-)discover loops so that bb->loop_father can be used in the
 	 analysis below.  */
+      calculate_dominance_info (CDI_DOMINATORS);
       loop_optimizer_init (AVOID_CFG_MODIFICATIONS);
 
       /* Generate a vxorps at entry of the nearest dominator for basic
@@ -2263,7 +2347,6 @@ remove_partial_avx_dependency (void)
 	set_insn = emit_insn_after (set,
 				    insn ? PREV_INSN (insn) : BB_END (bb));
       df_insn_rescan (set_insn);
-      df_process_deferred_rescans ();
       loop_optimizer_finalize ();
 
       if (!control_flow_insns.is_empty ())
@@ -2284,6 +2367,8 @@ remove_partial_avx_dependency (void)
 	}
     }
 
+  df_process_deferred_rescans ();
+  df_clear_flags (DF_DEFER_INSN_RESCAN);
   bitmap_obstack_release (NULL);
   BITMAP_FREE (convert_bbs);
 
@@ -2303,7 +2388,7 @@ const pass_data pass_data_remove_partial_avx_dependency =
   0, /* properties_provided */
   0, /* properties_destroyed */
   0, /* todo_flags_start */
-  TODO_df_finish, /* todo_flags_finish */
+  0, /* todo_flags_finish */
 };
 
 class pass_remove_partial_avx_dependency : public rtl_opt_pass

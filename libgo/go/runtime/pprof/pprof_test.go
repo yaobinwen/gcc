@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build !js
 // +build !js
 
 package pprof
@@ -10,20 +11,21 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"internal/profile"
 	"internal/testenv"
 	"io"
-	"io/ioutil"
+	"math"
 	"math/big"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
-	"runtime/pprof/internal/profile"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	_ "unsafe"
 )
 
 func cpuHogger(f func(x int) int, y *int, dur time.Duration) {
@@ -176,6 +178,25 @@ func inlinedCallee(x, n int) int {
 	return cpuHog0(x, n)
 }
 
+//go:noinline
+func dumpCallers(pcs []uintptr) {
+	if pcs == nil {
+		return
+	}
+
+	skip := 2 // Callers and dumpCallers
+	runtime.Callers(skip, pcs)
+}
+
+//go:noinline
+func inlinedCallerDump(pcs []uintptr) {
+	inlinedCalleeDump(pcs)
+}
+
+func inlinedCalleeDump(pcs []uintptr) {
+	dumpCallers(pcs)
+}
+
 func TestCPUProfileRecursion(t *testing.T) {
 	p := testCPUProfile(t, stackContains, []string{"runtime/pprof.inlinedCallee", "runtime/pprof.recursionCallee", "runtime/pprof.recursionCaller"}, avoidFunctions(), func(dur time.Duration) {
 		cpuHogger(recursionCaller, &salt1, dur)
@@ -208,6 +229,25 @@ func recursionCallee(n, x int) int {
 	return y * recursionCallee(n-1, x)
 }
 
+func recursionChainTop(x int, pcs []uintptr) {
+	if x < 0 {
+		return
+	}
+	recursionChainMiddle(x, pcs)
+}
+
+func recursionChainMiddle(x int, pcs []uintptr) {
+	recursionChainBottom(x, pcs)
+}
+
+func recursionChainBottom(x int, pcs []uintptr) {
+	// This will be called each time, we only care about the last. We
+	// can't make this conditional or this function won't be inlined.
+	dumpCallers(pcs)
+
+	recursionChainTop(x-1, pcs)
+}
+
 func parseProfile(t *testing.T, valBytes []byte, f func(uintptr, []*profile.Location, map[string][]string)) *profile.Profile {
 	p, err := profile.Parse(bytes.NewReader(valBytes))
 	if err != nil {
@@ -220,35 +260,43 @@ func parseProfile(t *testing.T, valBytes []byte, f func(uintptr, []*profile.Loca
 	return p
 }
 
+func cpuProfilingBroken() bool {
+	switch runtime.GOOS {
+	case "plan9":
+		// Profiling unimplemented.
+		return true
+	case "aix":
+		// See https://golang.org/issue/45170.
+		return true
+	case "ios", "dragonfly", "netbsd", "illumos", "solaris":
+		// See https://golang.org/issue/13841.
+		return true
+	case "openbsd":
+		if runtime.GOARCH == "arm" || runtime.GOARCH == "arm64" {
+			// See https://golang.org/issue/13841.
+			return true
+		}
+	}
+
+	return false
+}
+
 // testCPUProfile runs f under the CPU profiler, checking for some conditions specified by need,
 // as interpreted by matches, and returns the parsed profile.
 func testCPUProfile(t *testing.T, matches matchFunc, need []string, avoid []string, f func(dur time.Duration)) *profile.Profile {
 	switch runtime.GOOS {
 	case "darwin":
-		switch runtime.GOARCH {
-		case "arm", "arm64":
-			// nothing
-		default:
-			out, err := exec.Command("uname", "-a").CombinedOutput()
-			if err != nil {
-				t.Fatal(err)
-			}
-			vers := string(out)
-			t.Logf("uname -a: %v", vers)
+		out, err := exec.Command("uname", "-a").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
 		}
+		vers := string(out)
+		t.Logf("uname -a: %v", vers)
 	case "plan9":
 		t.Skip("skipping on plan9")
 	}
 
-	broken := false
-	switch runtime.GOOS {
-	case "darwin", "dragonfly", "netbsd", "illumos", "solaris":
-		broken = true
-	case "openbsd":
-		if runtime.GOARCH == "arm" || runtime.GOARCH == "arm64" {
-			broken = true
-		}
-	}
+	broken := cpuProfilingBroken()
 
 	maxDuration := 5 * time.Second
 	if testing.Short() && broken {
@@ -482,8 +530,10 @@ func TestGoroutineSwitch(t *testing.T) {
 		}
 		StopCPUProfile()
 
-		// Read profile to look for entries for runtime.gogo with an attempt at a traceback.
-		// The special entry
+		// Read profile to look for entries for gogo with an attempt at a traceback.
+		// "runtime.gogo" is OK, because that's the part of the context switch
+		// before the actual switch begins. But we should not see "gogo",
+		// aka "gogo<>(SB)", which does the actual switch and is marked SPWRITE.
 		parseProfile(t, prof.Bytes(), func(count uintptr, stk []*profile.Location, _ map[string][]string) {
 			// An entry with two frames with 'System' in its top frame
 			// exists to record a PC without a traceback. Those are okay.
@@ -494,13 +544,19 @@ func TestGoroutineSwitch(t *testing.T) {
 				}
 			}
 
-			// Otherwise, should not see runtime.gogo.
+			// An entry with just one frame is OK too:
+			// it knew to stop at gogo.
+			if len(stk) == 1 {
+				return
+			}
+
+			// Otherwise, should not see gogo.
 			// The place we'd see it would be the inner most frame.
 			name := stk[0].Line[0].Function.Name
-			if name == "runtime.gogo" {
+			if name == "gogo" {
 				var buf bytes.Buffer
 				fprintStack(&buf, stk)
-				t.Fatalf("found profile entry for runtime.gogo:\n%s", buf.String())
+				t.Fatalf("found profile entry for gogo:\n%s", buf.String())
 			}
 		})
 	}
@@ -574,17 +630,20 @@ func TestMorestack(t *testing.T) {
 
 //go:noinline
 func growstack1() {
-	growstack()
+	growstack(10)
 }
 
 //go:noinline
-func growstack() {
-	var buf [8 << 10]byte
+func growstack(n int) {
+	var buf [8 << 18]byte
 	use(buf)
+	if n > 0 {
+		growstack(n - 1)
+	}
 }
 
 //go:noinline
-func use(x [8 << 10]byte) {}
+func use(x [8 << 18]byte) {}
 
 func TestBlockProfile(t *testing.T) {
 	t.Skip("lots of details are different for gccgo; FIXME")
@@ -863,6 +922,74 @@ func blockCond() {
 	mu.Unlock()
 }
 
+// See http://golang.org/cl/299991.
+func TestBlockProfileBias(t *testing.T) {
+	rate := int(1000) // arbitrary value
+	runtime.SetBlockProfileRate(rate)
+	defer runtime.SetBlockProfileRate(0)
+
+	// simulate blocking events
+	blockFrequentShort(rate)
+	blockInfrequentLong(rate)
+
+	var w bytes.Buffer
+	Lookup("block").WriteTo(&w, 0)
+	p, err := profile.Parse(&w)
+	if err != nil {
+		t.Fatalf("failed to parse profile: %v", err)
+	}
+	t.Logf("parsed proto: %s", p)
+
+	il := float64(-1) // blockInfrequentLong duration
+	fs := float64(-1) // blockFrequentShort duration
+	for _, s := range p.Sample {
+		for _, l := range s.Location {
+			for _, line := range l.Line {
+				if len(s.Value) < 2 {
+					t.Fatal("block profile has less than 2 sample types")
+				}
+
+				if line.Function.Name == "runtime/pprof.blockInfrequentLong" {
+					il = float64(s.Value[1])
+				} else if line.Function.Name == "runtime/pprof.blockFrequentShort" {
+					fs = float64(s.Value[1])
+				}
+			}
+		}
+	}
+	if il == -1 || fs == -1 {
+		t.Fatal("block profile is missing expected functions")
+	}
+
+	// stddev of bias from 100 runs on local machine multiplied by 10x
+	const threshold = 0.2
+	if bias := (il - fs) / il; math.Abs(bias) > threshold {
+		t.Fatalf("bias: abs(%f) > %f", bias, threshold)
+	} else {
+		t.Logf("bias: abs(%f) < %f", bias, threshold)
+	}
+}
+
+// blockFrequentShort produces 100000 block events with an average duration of
+// rate / 10.
+func blockFrequentShort(rate int) {
+	for i := 0; i < 100000; i++ {
+		blockevent(int64(rate/10), 1)
+	}
+}
+
+// blockFrequentShort produces 10000 block events with an average duration of
+// rate.
+func blockInfrequentLong(rate int) {
+	for i := 0; i < 10000; i++ {
+		blockevent(int64(rate), 1)
+	}
+}
+
+// Used by TestBlockProfileBias.
+//go:linkname blockevent runtime.blockevent
+func blockevent(cycles int64, skip int)
+
 func TestMutexProfile(t *testing.T) {
 	// Generate mutex profile
 
@@ -920,8 +1047,8 @@ func TestMutexProfile(t *testing.T) {
 
 		stks := stacks(p)
 		for _, want := range [][]string{
-			// {"sync.(*Mutex).Unlock", "pprof.blockMutex.func1"},
-			{"sync.Mutex.Unlock", "pprof.blockMutex..func1"},
+			// {"sync.(*Mutex).Unlock", "runtime/pprof.blockMutex.func1"},
+			{"sync.Mutex.Unlock", "runtime/pprof.blockMutex..func1"},
 		} {
 			if !containsStack(stks, want) {
 				t.Errorf("No matching stack entry for %+v", want)
@@ -959,6 +1086,26 @@ func TestGoroutineCounts(t *testing.T) {
 			runtime.Gosched()
 		}
 	}
+	ctx := context.Background()
+
+	// ... and again, with labels this time (just with fewer iterations to keep
+	// sorting deterministic).
+	Do(ctx, Labels("label", "value"), func(context.Context) {
+		for i := 0; i < 89; i++ {
+			switch {
+			case i%10 == 0:
+				go func1(c)
+			case i%2 == 0:
+				go func2(c)
+			default:
+				go func3(c)
+			}
+			// Let goroutines block on channel
+			for j := 0; j < 5; j++ {
+				runtime.Gosched()
+			}
+		}
+	})
 
 	var w bytes.Buffer
 	goroutineProf := Lookup("goroutine")
@@ -967,8 +1114,11 @@ func TestGoroutineCounts(t *testing.T) {
 	goroutineProf.WriteTo(&w, 1)
 	prof := w.String()
 
-	if !containsInOrder(prof, "\n50 @ ", "\n40 @", "\n10 @", "\n1 @") {
-		t.Errorf("expected sorted goroutine counts:\n%s", prof)
+	labels := labelMap{"label": "value"}
+	labelStr := "\n# labels: " + labels.String()
+	if !containsInOrder(prof, "\n50 @ ", "\n44 @", labelStr,
+		"\n40 @", "\n36 @", labelStr, "\n10 @", "\n9 @", labelStr, "\n1 @") {
+		t.Errorf("expected sorted goroutine counts with Labels:\n%s", prof)
 	}
 
 	// Check proto profile
@@ -981,9 +1131,18 @@ func TestGoroutineCounts(t *testing.T) {
 	if err := p.CheckValid(); err != nil {
 		t.Errorf("protobuf profile is invalid: %v", err)
 	}
-	if !containsCounts(p, []int64{50, 40, 10, 1}) {
-		t.Errorf("expected count profile to contain goroutines with counts %v, got %v",
-			[]int64{50, 40, 10, 1}, p)
+	expectedLabels := map[int64]map[string]string{
+		50: map[string]string{},
+		44: map[string]string{"label": "value"},
+		40: map[string]string{},
+		36: map[string]string{"label": "value"},
+		10: map[string]string{},
+		9:  map[string]string{"label": "value"},
+		1:  map[string]string{},
+	}
+	if !containsCountsLabels(p, expectedLabels) {
+		t.Errorf("expected count profile to contain goroutines with counts and labels %v, got %v",
+			expectedLabels, p)
 	}
 
 	close(c)
@@ -1002,10 +1161,23 @@ func containsInOrder(s string, all ...string) bool {
 	return true
 }
 
-func containsCounts(prof *profile.Profile, counts []int64) bool {
+func containsCountsLabels(prof *profile.Profile, countLabels map[int64]map[string]string) bool {
 	m := make(map[int64]int)
-	for _, c := range counts {
+	type nkey struct {
+		count    int64
+		key, val string
+	}
+	n := make(map[nkey]int)
+	for c, kv := range countLabels {
 		m[c]++
+		for k, v := range kv {
+			n[nkey{
+				count: c,
+				key:   k,
+				val:   v,
+			}]++
+
+		}
 	}
 	for _, s := range prof.Sample {
 		// The count is the single value in the sample
@@ -1013,9 +1185,23 @@ func containsCounts(prof *profile.Profile, counts []int64) bool {
 			return false
 		}
 		m[s.Value[0]]--
+		for k, vs := range s.Label {
+			for _, v := range vs {
+				n[nkey{
+					count: s.Value[0],
+					key:   k,
+					val:   v,
+				}]--
+			}
+		}
 	}
 	for _, n := range m {
 		if n > 0 {
+			return false
+		}
+	}
+	for _, ncnt := range n {
+		if ncnt != 0 {
 			return false
 		}
 	}
@@ -1098,7 +1284,7 @@ func TestLabelRace(t *testing.T) {
 // Check that there is no deadlock when the program receives SIGPROF while in
 // 64bit atomics' critical section. Used to happen on mips{,le}. See #20146.
 func TestAtomicLoadStore64(t *testing.T) {
-	f, err := ioutil.TempFile("", "profatomic")
+	f, err := os.CreateTemp("", "profatomic")
 	if err != nil {
 		t.Fatalf("TempFile: %v", err)
 	}
@@ -1127,7 +1313,7 @@ func TestAtomicLoadStore64(t *testing.T) {
 func TestTracebackAll(t *testing.T) {
 	// With gccgo, if a profiling signal arrives at the wrong time
 	// during traceback, it may crash or hang. See issue #29448.
-	f, err := ioutil.TempFile("", "proftraceback")
+	f, err := os.CreateTemp("", "proftraceback")
 	if err != nil {
 		t.Fatalf("TempFile: %v", err)
 	}
@@ -1159,18 +1345,42 @@ func TestTracebackAll(t *testing.T) {
 	}
 }
 
-// TestTryAdd tests the cases that's hard to test with real program execution.
-// For example, the current go compilers may not inline functions involved in recursion
-// but that may not be true in the future compilers. This tests such cases by
-// using fake call sequences and forcing the profile build utilizing
-// translateCPUProfile defined in proto_test.go
+// TestTryAdd tests the cases that are hard to test with real program execution.
+//
+// For example, the current go compilers may not always inline functions
+// involved in recursion but that may not be true in the future compilers. This
+// tests such cases by using fake call sequences and forcing the profile build
+// utilizing translateCPUProfile defined in proto_test.go
 func TestTryAdd(t *testing.T) {
-	inlinedCallerPtr := uint64(funcPC(inlinedCaller)) + 1
-	inlinedCalleePtr, found := findInlinedCall(inlinedCaller, 4<<10)
-	if !found {
-		t.Skip("Can't determine whether inlinedCallee was inlined into inlinedCaller.")
+	if _, found := findInlinedCall(inlinedCallerDump, 4<<10); !found {
+		t.Skip("Can't determine whether anything was inlined into inlinedCallerDump.")
 	}
-	inlinedCalleePtr += 1 // +1 to be safely inside of the function body.
+
+	// inlinedCallerDump
+	//   inlinedCalleeDump
+	pcs := make([]uintptr, 2)
+	inlinedCallerDump(pcs)
+	inlinedCallerStack := make([]uint64, 2)
+	for i := range pcs {
+		inlinedCallerStack[i] = uint64(pcs[i])
+	}
+
+	if _, found := findInlinedCall(recursionChainBottom, 4<<10); !found {
+		t.Skip("Can't determine whether anything was inlined into recursionChainBottom.")
+	}
+
+	// recursionChainTop
+	//   recursionChainMiddle
+	//     recursionChainBottom
+	//       recursionChainTop
+	//         recursionChainMiddle
+	//           recursionChainBottom
+	pcs = make([]uintptr, 6)
+	recursionChainTop(1, pcs)
+	recursionStack := make([]uint64, len(pcs))
+	for i := range pcs {
+		recursionStack[i] = uint64(pcs[i])
+	}
 
 	period := int64(2000 * 1000) // 1/500*1e9 nanosec.
 
@@ -1180,13 +1390,29 @@ func TestTryAdd(t *testing.T) {
 		wantLocs    [][]string        // ordered location entries with function names.
 		wantSamples []*profile.Sample // ordered samples, we care only about Value and the profile location IDs.
 	}{{
+		// Sanity test for a normal, complete stack trace.
+		name: "full_stack_trace",
+		input: []uint64{
+			3, 0, 500, // hz = 500. Must match the period.
+			5, 0, 50, inlinedCallerStack[0], inlinedCallerStack[1],
+		},
+		wantLocs: [][]string{
+			{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"},
+		},
+		wantSamples: []*profile.Sample{
+			{Value: []int64{50, 50 * period}, Location: []*profile.Location{{ID: 1}}},
+		},
+	}, {
 		name: "bug35538",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			7, 0, 10, inlinedCalleePtr, inlinedCallerPtr, inlinedCalleePtr, inlinedCallerPtr,
-			5, 0, 20, inlinedCalleePtr, inlinedCallerPtr,
+			// Fake frame: tryAdd will have inlinedCallerDump
+			// (stack[1]) on the deck when it encounters the next
+			// inline function. It should accept this.
+			7, 0, 10, inlinedCallerStack[0], inlinedCallerStack[1], inlinedCallerStack[0], inlinedCallerStack[1],
+			5, 0, 20, inlinedCallerStack[0], inlinedCallerStack[1],
 		},
-		wantLocs: [][]string{{"runtime/pprof.inlinedCallee", "runtime/pprof.inlinedCaller"}},
+		wantLocs: [][]string{{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"}},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{10, 10 * period}, Location: []*profile.Location{{ID: 1}, {ID: 1}}},
 			{Value: []int64{20, 20 * period}, Location: []*profile.Location{{ID: 1}}},
@@ -1204,34 +1430,56 @@ func TestTryAdd(t *testing.T) {
 			{Value: []int64{4242, 4242 * period}, Location: []*profile.Location{{ID: 1}}},
 		},
 	}, {
-		// If a function is called recursively then it must not be
-		// inlined in the caller.
+		// If a function is directly called recursively then it must
+		// not be inlined in the caller.
 		//
 		// N.B. We're generating an impossible profile here, with a
-		// recursive inlineCallee call. This is simulating a non-Go
+		// recursive inlineCalleeDump call. This is simulating a non-Go
 		// function that looks like an inlined Go function other than
 		// its recursive property. See pcDeck.tryAdd.
-		name: "recursive_func_is_not_inlined",
+		name: "directly_recursive_func_is_not_inlined",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			5, 0, 30, inlinedCalleePtr, inlinedCalleePtr,
-			4, 0, 40, inlinedCalleePtr,
+			5, 0, 30, inlinedCallerStack[0], inlinedCallerStack[0],
+			4, 0, 40, inlinedCallerStack[0],
 		},
-		// inlinedCaller shows up here because
+		// inlinedCallerDump shows up here because
 		// runtime_expandFinalInlineFrame adds it to the stack frame.
-		wantLocs: [][]string{{"runtime/pprof.inlinedCallee"}, {"runtime/pprof.inlinedCaller"}},
+		wantLocs: [][]string{{"runtime/pprof.inlinedCalleeDump"}, {"runtime/pprof.inlinedCallerDump"}},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{30, 30 * period}, Location: []*profile.Location{{ID: 1}, {ID: 1}, {ID: 2}}},
 			{Value: []int64{40, 40 * period}, Location: []*profile.Location{{ID: 1}, {ID: 2}}},
 		},
 	}, {
+		name: "recursion_chain_inline",
+		input: []uint64{
+			3, 0, 500, // hz = 500. Must match the period.
+			9, 0, 10, recursionStack[0], recursionStack[1], recursionStack[2], recursionStack[3], recursionStack[4], recursionStack[5],
+		},
+		wantLocs: [][]string{
+			{"runtime/pprof.recursionChainBottom"},
+			{
+				"runtime/pprof.recursionChainMiddle",
+				"runtime/pprof.recursionChainTop",
+				"runtime/pprof.recursionChainBottom",
+			},
+			{
+				"runtime/pprof.recursionChainMiddle",
+				"runtime/pprof.recursionChainTop",
+				"runtime/pprof.TestTryAdd", // inlined into the test.
+			},
+		},
+		wantSamples: []*profile.Sample{
+			{Value: []int64{10, 10 * period}, Location: []*profile.Location{{ID: 1}, {ID: 2}, {ID: 3}}},
+		},
+	}, {
 		name: "truncated_stack_trace_later",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			5, 0, 50, inlinedCalleePtr, inlinedCallerPtr,
-			4, 0, 60, inlinedCalleePtr,
+			5, 0, 50, inlinedCallerStack[0], inlinedCallerStack[1],
+			4, 0, 60, inlinedCallerStack[0],
 		},
-		wantLocs: [][]string{{"runtime/pprof.inlinedCallee", "runtime/pprof.inlinedCaller"}},
+		wantLocs: [][]string{{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"}},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{50, 50 * period}, Location: []*profile.Location{{ID: 1}}},
 			{Value: []int64{60, 60 * period}, Location: []*profile.Location{{ID: 1}}},
@@ -1240,10 +1488,10 @@ func TestTryAdd(t *testing.T) {
 		name: "truncated_stack_trace_first",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			4, 0, 70, inlinedCalleePtr,
-			5, 0, 80, inlinedCalleePtr, inlinedCallerPtr,
+			4, 0, 70, inlinedCallerStack[0],
+			5, 0, 80, inlinedCallerStack[0], inlinedCallerStack[1],
 		},
-		wantLocs: [][]string{{"runtime/pprof.inlinedCallee", "runtime/pprof.inlinedCaller"}},
+		wantLocs: [][]string{{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"}},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{70, 70 * period}, Location: []*profile.Location{{ID: 1}}},
 			{Value: []int64{80, 80 * period}, Location: []*profile.Location{{ID: 1}}},
@@ -1253,9 +1501,9 @@ func TestTryAdd(t *testing.T) {
 		name: "truncated_stack_trace_only",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			4, 0, 70, inlinedCalleePtr,
+			4, 0, 70, inlinedCallerStack[0],
 		},
-		wantLocs: [][]string{{"runtime/pprof.inlinedCallee", "runtime/pprof.inlinedCaller"}},
+		wantLocs: [][]string{{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"}},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{70, 70 * period}, Location: []*profile.Location{{ID: 1}}},
 		},
@@ -1264,12 +1512,16 @@ func TestTryAdd(t *testing.T) {
 		name: "truncated_stack_trace_twice",
 		input: []uint64{
 			3, 0, 500, // hz = 500. Must match the period.
-			4, 0, 70, inlinedCalleePtr,
-			5, 0, 80, inlinedCallerPtr, inlinedCalleePtr,
+			4, 0, 70, inlinedCallerStack[0],
+			// Fake frame: add a fake call to
+			// inlinedCallerDump to prevent this sample
+			// from getting merged into above.
+			5, 0, 80, inlinedCallerStack[1], inlinedCallerStack[0],
 		},
 		wantLocs: [][]string{
-			{"runtime/pprof.inlinedCallee", "runtime/pprof.inlinedCaller"},
-			{"runtime/pprof.inlinedCaller"}},
+			{"runtime/pprof.inlinedCalleeDump", "runtime/pprof.inlinedCallerDump"},
+			{"runtime/pprof.inlinedCallerDump"},
+		},
 		wantSamples: []*profile.Sample{
 			{Value: []int64{70, 70 * period}, Location: []*profile.Location{{ID: 1}}},
 			{Value: []int64{80, 80 * period}, Location: []*profile.Location{{ID: 2}, {ID: 1}}},
